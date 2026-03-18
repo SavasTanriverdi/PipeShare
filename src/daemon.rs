@@ -112,7 +112,10 @@ pub async fn run_daemon() -> Result<()> {
                 while let Ok(pending) = rx.try_recv() {
                     match pending {
                         ScreenShareEvent::Started { app_name, node_id } => {
-                            info!("[+] New screen share detected during debounce (node: {})", node_id);
+                            info!(
+                                "[+] New screen share detected during debounce (node: {})",
+                                node_id
+                            );
                             new_share_active = true;
                             // Re-link audio for the existing route if we have one
                             if let Some(ref route) = active_route {
@@ -123,7 +126,10 @@ pub async fn run_daemon() -> Result<()> {
                             }
                         }
                         ScreenShareEvent::Stopped { node_id: other_id } => {
-                            debug!("[-] Additional stop event during debounce (node: {})", other_id);
+                            debug!(
+                                "[-] Additional stop event during debounce (node: {})",
+                                other_id
+                            );
                         }
                     }
                 }

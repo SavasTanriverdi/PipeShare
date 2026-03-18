@@ -319,7 +319,11 @@ async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
         return Ok(());
     }
 
-    info!("[*] Found {} output ports for '{}'", app_ports.len(), target_app_name);
+    info!(
+        "[*] Found {} output ports for '{}'",
+        app_ports.len(),
+        target_app_name
+    );
 
     // Link each app output port to the corresponding PipeShare_Mix input port
     for port in &app_ports {
@@ -329,9 +333,7 @@ async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
             || port.contains("front-left")
         {
             "PipeShare_Mix:playback_FL"
-        } else if port.contains("FR")
-            || port.contains(":output_1")
-            || port.contains("front-right")
+        } else if port.contains("FR") || port.contains(":output_1") || port.contains("front-right")
         {
             "PipeShare_Mix:playback_FR"
         } else {
@@ -345,7 +347,10 @@ async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
         }
     }
 
-    info!("[+] {} audio tapped successfully — output device remains user-controlled", target_app_name);
+    info!(
+        "[+] {} audio tapped successfully — output device remains user-controlled",
+        target_app_name
+    );
     Ok(())
 }
 
@@ -358,22 +363,30 @@ async fn move_recording_apps_to_mic(virtual_mic_name: &str) -> Result<()> {
 
     for line in output.lines() {
         let trimmed = line.trim();
-        
+
         // Find the recording stream ID
         if trimmed.starts_with("Source Output #") {
-            current_id = trimmed.strip_prefix("Source Output #").map(|s| s.to_string());
-        } 
+            current_id = trimmed
+                .strip_prefix("Source Output #")
+                .map(|s| s.to_string());
+        }
         // Identify the application name
         else if trimmed.starts_with("application.name =") {
             if let Some(name_str) = trimmed.split('=').nth(1) {
                 let name = name_str.trim().trim_matches('"');
-                
+
                 // We want to move communication apps that are actively recording.
                 // We exclude system processes or PipeWire's own loops to prevent feedback loops.
-                if !FILTERED_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+                if !FILTERED_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                {
                     if let Some(ref id) = current_id {
                         match run_pactl(&["move-source-output", id, virtual_mic_name]).await {
-                            Ok(_) => info!("[+] Routed recording app '{}' (ID: {}) to {}", name, id, virtual_mic_name),
+                            Ok(_) => info!(
+                                "[+] Routed recording app '{}' (ID: {}) to {}",
+                                name, id, virtual_mic_name
+                            ),
                             Err(e) => debug!("[-] Skipping move for recording app {}: {}", name, e),
                         }
                     }
@@ -436,7 +449,9 @@ async fn restore_recording_streams_to_default() {
     for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("Source Output #") {
-            current_id = trimmed.strip_prefix("Source Output #").map(|s| s.to_string());
+            current_id = trimmed
+                .strip_prefix("Source Output #")
+                .map(|s| s.to_string());
         } else if trimmed.contains("PipeShare") || trimmed.contains("pipeshare") {
             // This source-output is connected to a PipeShare source — restore it
             if let Some(ref id) = current_id {

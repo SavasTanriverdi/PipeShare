@@ -126,7 +126,8 @@ pub async fn monitor_screen_share(tx: mpsc::Sender<ScreenShareEvent>) -> Result<
     loop {
         info!("[*] Launching pw-dump --monitor...");
 
-        let result = run_monitor_loop(&tx, &mut known_screencast_ids, &mut active_session_ids).await;
+        let result =
+            run_monitor_loop(&tx, &mut known_screencast_ids, &mut active_session_ids).await;
 
         match result {
             Ok(_) => {
