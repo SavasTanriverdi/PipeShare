@@ -1,6 +1,6 @@
 [Unit]
 Description=PipeShare — Seamless Audio Sharing for Linux
-Documentation=https://github.com/savas/pipeshare
+Documentation=https://github.com/SavasTanriverdi/PipeShare
 After=pipewire.service wireplumber.service
 Wants=pipewire.service
 

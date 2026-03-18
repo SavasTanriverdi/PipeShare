@@ -45,8 +45,8 @@ When you share your screen:
 1. Ensure you have Rust and Cargo installed (`rustup`).
 2. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/pipeshare.git
-   cd pipeshare
+   git clone https://github.com/SavasTanriverdi/PipeShare.git
+   cd PipeShare
    ```
 3. Build the project:
    ```bash
