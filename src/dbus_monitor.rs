@@ -250,9 +250,23 @@ async fn process_pw_dump_update(
         return;
     }
 
-    // Collect all video node IDs in this update
-    let mut current_video_ids: HashSet<u32> = HashSet::new();
+    // 1. Process explicit deletions first
+    // When PipeWire destroys a node, pw-dump sends the id with info: null
+    let mut removed_ids = Vec::new();
+    for obj in &objects {
+        if obj.info.is_none() && active_session_ids.contains(&obj.id) {
+            removed_ids.push(obj.id);
+        }
+    }
 
+    for node_id in removed_ids {
+        info!("[-] Screen sharing STOPPED! node_id={}", node_id);
+        known_ids.remove(&node_id);
+        active_session_ids.remove(&node_id);
+        let _ = tx.send(ScreenShareEvent::Stopped { node_id }).await;
+    }
+
+    // 2. Process additions / updates
     for obj in &objects {
         let Some(info) = &obj.info else { continue };
         let Some(props) = &info.props else { continue };
@@ -271,8 +285,6 @@ async fn process_pw_dump_update(
         if ALWAYS_PRESENT_NODES.iter().any(|n| node_name.contains(n)) {
             continue;
         }
-
-        current_video_ids.insert(obj.id);
 
         // Is it a new ScreenCast node?
         if !known_ids.contains(&obj.id) {
@@ -297,23 +309,6 @@ async fn process_pw_dump_update(
                     node_id: obj.id,
                 })
                 .await;
-        }
-    }
-
-    // Detect closed ScreenCast nodes — ONLY for nodes we actively tracked.
-    // Baseline nodes (present at daemon startup) are never considered "stopped".
-    if !current_video_ids.is_empty() {
-        let removed: Vec<u32> = active_session_ids
-            .iter()
-            .filter(|id| !current_video_ids.contains(id))
-            .copied()
-            .collect();
-
-        for node_id in removed {
-            info!("[-] Screen sharing STOPPED! node_id={}", node_id);
-            known_ids.remove(&node_id);
-            active_session_ids.remove(&node_id);
-            let _ = tx.send(ScreenShareEvent::Stopped { node_id }).await;
         }
     }
 }

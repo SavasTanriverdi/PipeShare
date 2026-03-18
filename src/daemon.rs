@@ -49,11 +49,45 @@ pub async fn run_daemon() -> Result<()> {
     // Track active audio routing
     let mut active_route: Option<audio::AudioRoute> = None;
     let mut active_node_id: Option<u32> = None;
+    let mut pending_cleanup = false;
 
     // Main event loop
-    while let Some(event) = rx.recv().await {
+    loop {
+        let event_opt = if pending_cleanup {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await {
+                Ok(Some(e)) => Some(e),
+                Ok(None) => None,
+                Err(_) => {
+                    info!("[*] Cleanup timeout reached. Destroying audio route.");
+                    if let Some(route) = active_route.take() {
+                        let _ = audio::destroy_audio_route(&route).await;
+                        // Removed the annoying "Audio Share Terminated" notification as requested
+                    }
+                    active_node_id = None;
+                    pending_cleanup = false;
+                    continue;
+                }
+            }
+        } else {
+            rx.recv().await
+        };
+
+        let Some(event) = event_opt else { break; };
+
         match event {
             ScreenShareEvent::Started { app_name, node_id } => {
+                if pending_cleanup {
+                    info!("[*] Reconnect detected within 3s timeout! Cancelling cleanup.");
+                    pending_cleanup = false;
+                    if let Some(ref route) = active_route {
+                        for app in &route.target_apps {
+                            let _ = audio::relink_app_to_mix(app).await;
+                        }
+                    }
+                    active_node_id = Some(node_id);
+                    continue;
+                }
+
                 let detected_name = app_name.unwrap_or_else(|| "Unknown".to_string());
                 info!(
                     "[+] Screen share detected via app={}, node={}",
@@ -127,20 +161,8 @@ pub async fn run_daemon() -> Result<()> {
                     continue;
                 }
 
-                // Current node stopped — clean up
-                active_node_id = None;
-
-                if let Some(route) = active_route.take() {
-                    if let Err(e) = audio::destroy_audio_route(&route).await {
-                        error!("[-] Cleanup failure: {}", e);
-                    } else {
-                        send_notification(
-                            "Audio Share Terminated",
-                            "Screen sharing has concluded. Audio routing is now disabled.",
-                        )
-                        .await;
-                    }
-                }
+                info!("[*] Screen Share stopped. Waiting 3s for possible WebRTC renegotiation reconnects...");
+                pending_cleanup = true;
             }
         }
     }
