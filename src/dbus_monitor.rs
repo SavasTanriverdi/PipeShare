@@ -120,11 +120,13 @@ pub async fn monitor_screen_share(tx: mpsc::Sender<ScreenShareEvent>) -> Result<
     // This set tracks known screen sharing nodes.
     // Initial nodes are saved as "baseline" to distinguish newly added ones.
     let mut known_screencast_ids: HashSet<u32> = baseline_ids;
+    // Tracks ONLY nodes detected via Started events (not baseline)
+    let mut active_session_ids: HashSet<u32> = HashSet::new();
 
     loop {
         info!("[*] Launching pw-dump --monitor...");
 
-        let result = run_monitor_loop(&tx, &mut known_screencast_ids).await;
+        let result = run_monitor_loop(&tx, &mut known_screencast_ids, &mut active_session_ids).await;
 
         match result {
             Ok(_) => {
@@ -145,6 +147,7 @@ pub async fn monitor_screen_share(tx: mpsc::Sender<ScreenShareEvent>) -> Result<
 async fn run_monitor_loop(
     tx: &mpsc::Sender<ScreenShareEvent>,
     known_ids: &mut HashSet<u32>,
+    active_session_ids: &mut HashSet<u32>,
 ) -> Result<()> {
     let mut child = tokio::process::Command::new("pw-dump")
         .args(["--monitor", "--no-colors"])
@@ -201,7 +204,7 @@ async fn run_monitor_loop(
             // Array closed — parse time
             if bracket_depth == 0 {
                 in_array = false;
-                process_pw_dump_update(&json_buffer, tx, known_ids).await;
+                process_pw_dump_update(&json_buffer, tx, known_ids, active_session_ids).await;
                 json_buffer.clear();
             }
         }
@@ -215,18 +218,36 @@ async fn run_monitor_loop(
 /// Processes a single `pw-dump` JSON update.
 ///
 /// Detects new ScreenCast nodes and identifies vanished nodes.
+///
+/// `known_ids` contains ALL known screencast node IDs (baseline + active).
+/// `active_session_ids` contains ONLY nodes detected via Started events.
+/// Stopped events are only sent for nodes in `active_session_ids`.
 async fn process_pw_dump_update(
     json_str: &str,
     tx: &mpsc::Sender<ScreenShareEvent>,
     known_ids: &mut HashSet<u32>,
+    active_session_ids: &mut HashSet<u32>,
 ) {
-    let objects: Vec<PwDumpObject> = match serde_json::from_str(json_str) {
-        Ok(objs) => objs,
+    // pw-dump can output mixed-type JSON arrays (objects + strings like "Audio/Sink").
+    // Parse as Value first, then filter to only objects.
+    let raw_values: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
+        Ok(vals) => vals,
         Err(e) => {
             debug!("JSON parsing error (skipping update): {}", e);
             return;
         }
     };
+
+    // Filter to only object values and deserialize them
+    let objects: Vec<PwDumpObject> = raw_values
+        .into_iter()
+        .filter(|v| v.is_object())
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+
+    if objects.is_empty() {
+        return;
+    }
 
     // Collect all video node IDs in this update
     let mut current_video_ids: HashSet<u32> = HashSet::new();
@@ -267,6 +288,7 @@ async fn process_pw_dump_update(
             );
 
             known_ids.insert(obj.id);
+            active_session_ids.insert(obj.id);
 
             let _ = tx
                 .send(ScreenShareEvent::Started {
@@ -277,21 +299,19 @@ async fn process_pw_dump_update(
         }
     }
 
-    // Detect closed ScreenCast nodes
-    let removed: Vec<u32> = known_ids
-        .iter()
-        .filter(|id| !current_video_ids.contains(id))
-        .copied()
-        .collect();
+    // Detect closed ScreenCast nodes — ONLY for nodes we actively tracked.
+    // Baseline nodes (present at daemon startup) are never considered "stopped".
+    if !current_video_ids.is_empty() {
+        let removed: Vec<u32> = active_session_ids
+            .iter()
+            .filter(|id| !current_video_ids.contains(id))
+            .copied()
+            .collect();
 
-    for node_id in removed {
-        // However, only remove those within the scope of this update
-        // (pw-dump --monitor might not send the whole graph every time)
-        // Therefore, we solely declare a node stopped if the node's absence
-        // is certain according to `current_video_ids`.
-        if !current_video_ids.is_empty() {
+        for node_id in removed {
             info!("[-] Screen sharing STOPPED! node_id={}", node_id);
             known_ids.remove(&node_id);
+            active_session_ids.remove(&node_id);
             let _ = tx.send(ScreenShareEvent::Stopped { node_id }).await;
         }
     }

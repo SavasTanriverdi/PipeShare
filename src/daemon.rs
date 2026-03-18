@@ -15,7 +15,7 @@
 use anyhow::Result;
 use std::process::Stdio;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::audio;
 use crate::dbus_monitor::{self, ScreenShareEvent};
@@ -102,7 +102,38 @@ pub async fn run_daemon() -> Result<()> {
             ScreenShareEvent::Stopped { node_id } => {
                 info!("[-] Screen Share ceased (node: {})", node_id);
 
-                // Terminate active routing configuration
+                // DEBOUNCE: When user toggles screen sharing (stop → restart),
+                // PipeWire sends Stopped and Started events nearly simultaneously.
+                // Wait briefly to see if a new session immediately replaces this one.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                // Drain any pending Started events that arrived during the wait
+                let mut new_share_active = false;
+                while let Ok(pending) = rx.try_recv() {
+                    match pending {
+                        ScreenShareEvent::Started { app_name, node_id } => {
+                            info!("[+] New screen share detected during debounce (node: {})", node_id);
+                            new_share_active = true;
+                            // Re-link audio for the existing route if we have one
+                            if let Some(ref route) = active_route {
+                                info!("[*] Re-linking audio for existing route...");
+                                for app_name in &route.target_apps {
+                                    let _ = audio::relink_app_to_mix(app_name).await;
+                                }
+                            }
+                        }
+                        ScreenShareEvent::Stopped { node_id: other_id } => {
+                            debug!("[-] Additional stop event during debounce (node: {})", other_id);
+                        }
+                    }
+                }
+
+                if new_share_active {
+                    info!("[*] Screen share was restarted — keeping audio route alive");
+                    continue;
+                }
+
+                // No new share started — clean up
                 if let Some(route) = active_route.take() {
                     if let Err(e) = audio::destroy_audio_route(&route).await {
                         error!("[-] Cleanup failure: {}", e);

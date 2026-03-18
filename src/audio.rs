@@ -278,6 +278,12 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     })
 }
 
+/// Public wrapper to re-create pw-link connections for an app.
+/// Used when screen sharing is toggled (stopped and restarted quickly).
+pub async fn relink_app_to_mix(target_app_name: &str) -> Result<()> {
+    link_app_to_mix(target_app_name).await
+}
+
 /// Creates parallel audio links from an application to PipeShare_Mix via `pw-link`.
 ///
 /// This is **non-destructive**: the app keeps its original audio output.
@@ -333,7 +339,7 @@ async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
             "PipeShare_Mix:playback_FL"
         };
 
-        match run_pw_link(&["--passive", port, mix_target]).await {
+        match run_pw_link(&[port, mix_target]).await {
             Ok(_) => info!("[+] {} → {} (parallel link)", port, mix_target),
             Err(e) => warn!("[-] Failed to link {}: {}", port, e),
         }
