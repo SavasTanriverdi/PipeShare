@@ -1,14 +1,16 @@
 [Unit]
 Description=PipeShare — Seamless Audio Sharing for Linux
 Documentation=https://github.com/SavasTanriverdi/PipeShare
-After=pipewire.service wireplumber.service
-Wants=pipewire.service
+After=pipewire.service wireplumber.service graphical-session.target xdg-desktop-portal.service
+Wants=pipewire.service xdg-desktop-portal.service
 
 [Service]
 Type=simple
+# Small delay to ensure DBus and Portal are fully registered in the session
+ExecStartPre=/bin/sleep 3
 ExecStart=/usr/local/bin/pipeshare daemon
 ExecStop=/usr/local/bin/pipeshare stop
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
 
