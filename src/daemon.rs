@@ -48,6 +48,7 @@ pub async fn run_daemon() -> Result<()> {
 
     // Track active audio routing
     let mut active_route: Option<audio::AudioRoute> = None;
+    let mut active_node_id: Option<u32> = None;
 
     // Main event loop
     while let Some(event) = rx.recv().await {
@@ -59,9 +60,20 @@ pub async fn run_daemon() -> Result<()> {
                     detected_name, node_id
                 );
 
-                // If already active, disregard duplicate events
+                // Update the active node ID — even if route exists
+                let old_node = active_node_id.replace(node_id);
+                if old_node.is_some() {
+                    info!("[*] Screen share node replaced: {:?} → {}", old_node, node_id);
+                }
+
+                // If route already exists, just re-link apps (node changed but route is same)
                 if active_route.is_some() {
-                    info!("[*] Audio routing already initialized, skipping request");
+                    info!("[*] Audio route already active, re-linking apps for new node");
+                    if let Some(ref route) = active_route {
+                        for app in &route.target_apps {
+                            let _ = audio::relink_app_to_mix(app).await;
+                        }
+                    }
                     continue;
                 }
 
@@ -102,44 +114,16 @@ pub async fn run_daemon() -> Result<()> {
             ScreenShareEvent::Stopped { node_id } => {
                 info!("[-] Screen Share ceased (node: {})", node_id);
 
-                // DEBOUNCE: When user toggles screen sharing (stop → restart),
-                // PipeWire sends Stopped and Started events nearly simultaneously.
-                // Wait briefly to see if a new session immediately replaces this one.
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                // Drain any pending Started events that arrived during the wait
-                let mut new_share_active = false;
-                while let Ok(pending) = rx.try_recv() {
-                    match pending {
-                        ScreenShareEvent::Started { app_name, node_id } => {
-                            info!(
-                                "[+] New screen share detected during debounce (node: {})",
-                                node_id
-                            );
-                            new_share_active = true;
-                            // Re-link audio for the existing route if we have one
-                            if let Some(ref route) = active_route {
-                                info!("[*] Re-linking audio for existing route...");
-                                for app_name in &route.target_apps {
-                                    let _ = audio::relink_app_to_mix(app_name).await;
-                                }
-                            }
-                        }
-                        ScreenShareEvent::Stopped { node_id: other_id } => {
-                            debug!(
-                                "[-] Additional stop event during debounce (node: {})",
-                                other_id
-                            );
-                        }
-                    }
-                }
-
-                if new_share_active {
-                    info!("[*] Screen share was restarted — keeping audio route alive");
+                // Only clean up if the CURRENT active node stopped.
+                // If an OLD node stopped (replaced by a new one), ignore it.
+                if active_node_id != Some(node_id) {
+                    info!("[*] Ignoring stop for old node {} (current: {:?})", node_id, active_node_id);
                     continue;
                 }
 
-                // No new share started — clean up
+                // Current node stopped — clean up
+                active_node_id = None;
+
                 if let Some(route) = active_route.take() {
                     if let Err(e) = audio::destroy_audio_route(&route).await {
                         error!("[-] Cleanup failure: {}", e);

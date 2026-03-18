@@ -177,24 +177,20 @@ async fn get_default_sink() -> Result<String> {
 /// Creates a complete audio route combining selected applications' audio
 /// and the real microphone.
 ///
-/// ## Architecture (pw-link Parallel Tap)
+/// ## Architecture (AppSink + Auto-Routing Loopback)
+///
 /// ```text
-///   Firefox Audio ──┬──► [User's Speaker] (unchanged, user-controlled)
-///                   │
-///                   └──► [PipeShare_Mix] ──► .monitor ──► Virtual Mic
-///   Real Microphone ──────┘                                    │
-///                                                              ▼
-///                                                       Discord/Element
+/// App Audio ──► PipeShare_AppSink ──┬──► Loopback → PipeShare_Mix → PipeShare_Mic → Remote
+///                                  └──► Loopback → (auto) → User's Speaker
+/// Real Mic ────────────────────────────► Loopback → PipeShare_Mix ↗
 /// ```
 ///
-/// Key difference from the old approach: we DO NOT move the app's audio
-/// away from the user's speaker. Instead, we use `pw-link` to create a
-/// parallel copy. This means the user can freely switch between GA104 HDMI,
-/// HyperX, or any other output device without breaking audio routing.
+/// move-sink-input captures the app's audio reliably (no WirePlumber conflicts).
+/// The local playback loopback has NO sink specified — WirePlumber auto-routes
+/// it to the default output and follows device changes (HyperX ↔ GA104 HDMI etc.)
 pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRoute> {
     let mut module_ids: Vec<u32> = Vec::new();
 
-    // Save current default source (microphone)
     let prev_source = get_default_source().await.ok();
 
     info!(
@@ -202,42 +198,53 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
         prev_source.as_deref().unwrap_or("unknown")
     );
 
-    // ─── Step 1: Create PipeShare_Mix (Null Sink) ───────────────────────
-    // This is the mixer: it receives app audio (via pw-link) and mic audio
-    // (via loopback). Its monitor becomes the virtual microphone.
-    let sink_id = run_pactl(&[
+    // ─── Step 1: Create PipeShare_AppSink (captures app audio) ──────────
+    let appsink_id = run_pactl(&[
         "load-module",
         "module-null-sink",
-        "sink_name=PipeShare_Mix",
-        r#"sink_properties="device.description=PipeShare_Mix device.class=filter""#,
+        "sink_name=PipeShare_AppSink",
+        r#"sink_properties="device.description=PipeShare_AppSink device.class=filter node.virtual=true""#,
         "channel_map=stereo",
     ])
     .await?;
-    if let Ok(mid) = sink_id.trim().parse::<u32>() {
+    if let Ok(mid) = appsink_id.trim().parse::<u32>() {
+        module_ids.push(mid);
+    }
+    info!("[+] PipeShare_AppSink created");
+
+    // ─── Step 2: Create PipeShare_Mix (mixer) ───────────────────────────
+    let mix_id = run_pactl(&[
+        "load-module",
+        "module-null-sink",
+        "sink_name=PipeShare_Mix",
+        r#"sink_properties="device.description=PipeShare_Mix device.class=filter node.virtual=true""#,
+        "channel_map=stereo",
+    ])
+    .await?;
+    if let Ok(mid) = mix_id.trim().parse::<u32>() {
         module_ids.push(mid);
     }
     info!("[+] PipeShare_Mix created");
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // ─── Step 2: Create Virtual Microphone (Remap Source) ───────────────
-    let source_id = run_pactl(&[
+    // ─── Step 3: Create Virtual Microphone (Remap Source) ───────────────
+    let mic_id = run_pactl(&[
         "load-module",
         "module-remap-source",
         "source_name=PipeShare_Mic",
         "master=PipeShare_Mix.monitor",
-        r#"source_properties="device.description=PipeShare_Mic device.class=filter""#,
+        r#"source_properties="device.description=PipeShare_Mic device.class=filter node.virtual=true""#,
     ])
     .await?;
-    if let Ok(mid) = source_id.trim().parse::<u32>() {
+    if let Ok(mid) = mic_id.trim().parse::<u32>() {
         module_ids.push(mid);
     }
     info!("[+] PipeShare_Mic virtual microphone created");
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // ─── Step 3: Real microphone → PipeShare_Mix ────────────────────────
-    // Remote party hears your voice.
+    // ─── Step 4: Real microphone → PipeShare_Mix ────────────────────────
     if let Some(ref mic) = prev_source {
         if let Ok(id) = run_pactl(&[
             "load-module",
@@ -255,18 +262,47 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
         info!("[+] Microphone loopback to PipeShare_Mix established");
     }
 
+    // ─── Step 5: AppSink.monitor → PipeShare_Mix (remote hears app) ─────
+    if let Ok(id) = run_pactl(&[
+        "load-module",
+        "module-loopback",
+        "source=PipeShare_AppSink.monitor",
+        "sink=PipeShare_Mix",
+        "latency_msec=30",
+    ])
+    .await
+    {
+        if let Ok(mid) = id.trim().parse::<u32>() {
+            module_ids.push(mid);
+        }
+    }
+    info!("[+] App audio → PipeShare_Mix loopback established");
+
+    // ─── Step 6: AppSink.monitor → User's Speaker (LOCAL PLAYBACK) ──────
+    // NO sink specified! WirePlumber auto-routes to the default output
+    // and follows device changes (HyperX ↔ GA104 HDMI etc.)
+    if let Ok(id) = run_pactl(&[
+        "load-module",
+        "module-loopback",
+        "source=PipeShare_AppSink.monitor",
+        "latency_msec=30",
+    ])
+    .await
+    {
+        if let Ok(mid) = id.trim().parse::<u32>() {
+            module_ids.push(mid);
+        }
+    }
+    info!("[+] Local playback loopback established (follows default output)");
+
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // ─── Step 4: Link app audio to PipeShare_Mix (PARALLEL) ─────────────
-    // Uses pw-link to create a parallel tap from the app's output ports
-    // to PipeShare_Mix input ports. The app's audio KEEPS flowing to
-    // whatever speaker the user has selected — we only add a copy.
+    // ─── Step 7: Move app audio to PipeShare_AppSink ────────────────────
     for app_name in target_app_names {
-        link_app_to_mix(app_name).await?;
+        move_app_to_appsink(app_name).await;
     }
 
-    // ─── Step 5: Route recording streams to PipeShare_Mic ───────────────
-    // Moves active recording (source-output) streams to our virtual mic.
+    // ─── Step 8: Route recording streams to PipeShare_Mic ───────────────
     move_recording_apps_to_mic("PipeShare_Mic.monitor").await?;
 
     info!("[+] Audio routing initialized — output device switching is fully supported!");
@@ -278,10 +314,46 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     })
 }
 
-/// Public wrapper to re-create pw-link connections for an app.
-/// Used when screen sharing is toggled (stopped and restarted quickly).
+/// Moves an application's sink-inputs to PipeShare_AppSink.
+async fn move_app_to_appsink(target_app_name: &str) {
+    let Ok(output) = run_pactl(&["list", "sink-inputs"]).await else {
+        return;
+    };
+
+    let mut current_id: Option<String> = None;
+    let mut moved = 0;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Sink Input #") {
+            current_id = trimmed.strip_prefix("Sink Input #").map(|s| s.to_string());
+        } else if trimmed.starts_with("application.name =") || trimmed.starts_with("node.name =") {
+            if let Some(name_str) = trimmed.split('=').nth(1) {
+                let name = name_str.trim().trim_matches('"');
+                if name.to_lowercase().contains(&target_app_name.to_lowercase()) {
+                    if let Some(ref id) = current_id {
+                        match run_pactl(&["move-sink-input", id, "PipeShare_AppSink"]).await {
+                            Ok(_) => {
+                                info!("[+] Moved '{}' (sink-input {}) to PipeShare_AppSink", name, id);
+                                moved += 1;
+                            }
+                            Err(e) => debug!("[-] Failed to move {}: {}", name, e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if moved == 0 {
+        warn!("[-] No sink-inputs found for '{}'", target_app_name);
+    }
+}
+
+/// Public wrapper to re-move app audio after a screen share restart.
 pub async fn relink_app_to_mix(target_app_name: &str) -> Result<()> {
-    link_app_to_mix(target_app_name).await
+    move_app_to_appsink(target_app_name).await;
+    Ok(())
 }
 
 /// Creates parallel audio links from an application to PipeShare_Mix via `pw-link`.
