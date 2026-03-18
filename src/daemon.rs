@@ -45,11 +45,6 @@ pub async fn run_daemon() -> Result<()> {
     });
 
     info!("[+] Daemon ready — standing by for screen share sequences...");
-    send_notification(
-        "PipeShare Active",
-        "Running in background. You will be notified upon screen sharing detection.",
-    )
-    .await;
 
     // Track active audio routing
     let mut active_route: Option<audio::AudioRoute> = None;

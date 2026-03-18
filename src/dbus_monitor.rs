@@ -333,39 +333,86 @@ async fn get_current_screencast_nodes() -> Result<HashSet<u32>> {
 
 // ─── D-Bus Portal Checks ─────────────────────────────────────────────────────
 
-/// Queries the `org.freedesktop.portal.ScreenCast` portal via D-Bus.
+/// Queries portal availability via D-Bus with thorough checks.
 ///
-/// Ensures the portal service is accessible. Used to verify
-/// the system has working portal support.
+/// Verifies:
+/// 1. `org.freedesktop.portal.Desktop` — the main portal service
+/// 2. `org.freedesktop.impl.portal.desktop.kde` — the KDE backend
+///    (provides ScreenCast, Screenshot, RemoteDesktop)
+///
+/// Both services may take time to appear during boot (D-Bus activated).
+/// Waits up to 30 seconds for each to become available.
 pub async fn check_portal_available() -> Result<bool> {
     let connection = Connection::session()
         .await
         .context("Failed to establish D-Bus session connection")?;
 
-    // Check presence of portal service
+    // Check 1: Main portal service (D-Bus activated, may not be running yet)
+    let mut portal_ok = check_dbus_name(&connection, "org.freedesktop.portal.Desktop").await;
+
+    if !portal_ok {
+        info!("[*] XDG Desktop Portal not yet on D-Bus, waiting up to 30s...");
+        for i in 1..=30 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            portal_ok = check_dbus_name(&connection, "org.freedesktop.portal.Desktop").await;
+            if portal_ok {
+                info!("[+] XDG Desktop Portal appeared after {}s", i);
+                break;
+            }
+        }
+    }
+
+    if !portal_ok {
+        warn!("[-] XDG Desktop Portal service not found after 30s");
+        return Ok(false);
+    }
+    info!("[+] XDG Desktop Portal is active and registered");
+
+    // Check 2: KDE backend (provides ScreenCast)
+    // On KDE Plasma/Wayland, this is the backend that handles screen sharing dialogs.
+    // If missing, ScreenCast requests will silently fail.
+    let mut kde_ok = check_dbus_name(&connection, "org.freedesktop.impl.portal.desktop.kde").await;
+
+    if !kde_ok {
+        info!("[*] KDE portal backend not yet on D-Bus, waiting up to 15s...");
+        for i in 1..=15 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            kde_ok = check_dbus_name(&connection, "org.freedesktop.impl.portal.desktop.kde").await;
+            if kde_ok {
+                info!("[+] KDE portal backend appeared after {}s", i);
+                break;
+            }
+        }
+    }
+
+    if kde_ok {
+        info!("[+] KDE ScreenCast portal backend is available");
+    } else {
+        warn!("[-] KDE portal backend not found — ScreenCast may not work!");
+        warn!("    Screen sharing dialogs may fail to appear.");
+        warn!("    Try: systemctl --user restart xdg-desktop-portal.service");
+    }
+
+    Ok(true)
+}
+
+/// Helper: checks if a D-Bus bus name is currently owned.
+async fn check_dbus_name(connection: &Connection, bus_name: &str) -> bool {
     let reply = connection
         .call_method(
             Some("org.freedesktop.DBus"),
             "/org/freedesktop/DBus",
             Some("org.freedesktop.DBus"),
             "NameHasOwner",
-            &"org.freedesktop.portal.Desktop",
+            &bus_name,
         )
         .await;
 
     match reply {
-        Ok(msg) => {
-            let has_owner: bool = msg.body().deserialize().unwrap_or(false);
-            if has_owner {
-                info!("[+] XDG Desktop Portal is active and registered");
-            } else {
-                warn!("[-] XDG Desktop Portal service not found");
-            }
-            Ok(has_owner)
-        }
+        Ok(msg) => msg.body().deserialize().unwrap_or(false),
         Err(e) => {
-            error!("[-] Portal check error: {}", e);
-            Ok(false)
+            debug!("D-Bus check for '{}' failed: {}", bus_name, e);
+            false
         }
     }
 }

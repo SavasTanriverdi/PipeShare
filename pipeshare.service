@@ -1,18 +1,42 @@
 [Unit]
 Description=PipeShare — Seamless Audio Sharing for Linux
 Documentation=https://github.com/SavasTanriverdi/PipeShare
-After=pipewire.service wireplumber.service graphical-session.target xdg-desktop-portal.service
-Wants=pipewire.service xdg-desktop-portal.service
+
+# Wait for:
+# - graphical-session.target: KDE desktop is fully initialized
+# - plasma-core.target: KDE Compositor and core services are up
+# - xdg-desktop-portal.service: portal may or may not be started yet
+# - plasma-xdg-desktop-portal-kde.service: KDE ScreenCast backend
+After=graphical-session.target plasma-core.target xdg-desktop-portal.service plasma-xdg-desktop-portal-kde.service
 
 [Service]
 Type=simple
-# Small delay to ensure DBus and Portal are fully registered in the session
-ExecStartPre=/bin/sleep 3
+
+# Wait for BOTH the main portal AND the KDE backend to be on D-Bus.
+# The main portal (org.freedesktop.portal.Desktop) is a D-Bus activated service,
+# so it may not be running yet at graphical-session.target time.
+# We poll D-Bus up to 30 seconds for both to appear.
+ExecStartPre=/bin/bash -c '\
+  echo "Waiting for xdg-desktop-portal and KDE backend on D-Bus..."; \
+  for i in $(seq 1 30); do \
+    portal=$(busctl --user list 2>/dev/null | grep -c "org.freedesktop.portal.Desktop"); \
+    kde=$(busctl --user list 2>/dev/null | grep -c "org.freedesktop.impl.portal.desktop.kde"); \
+    if [ "$portal" -ge 1 ] && [ "$kde" -ge 1 ]; then \
+      echo "Both portal services found after ${i}s"; \
+      exit 0; \
+    fi; \
+    sleep 1; \
+  done; \
+  echo "WARNING: Portal services not fully available after 30s" >&2; \
+  exit 0'
+
 ExecStart=/usr/local/bin/pipeshare daemon
 ExecStop=/usr/local/bin/pipeshare stop
-Restart=always
+Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
 
 [Install]
-WantedBy=default.target
+# Start with graphical session, NOT default.target
+# This ensures KDE is fully initialized before PipeShare launches.
+WantedBy=graphical-session.target
