@@ -13,6 +13,8 @@ ExecStop=/usr/local/bin/pipeshare stop
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=DISPLAY=:0
 
 [Install]
 WantedBy=default.target

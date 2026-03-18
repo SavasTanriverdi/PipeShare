@@ -304,18 +304,17 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
         info!("[+] {} audio routed successfully", app_name);
     }
 
-    // ─── Step 6: Make PipeShare_Mic the default source ──────────────────
-    match run_pactl(&["set-default-source", "PipeShare_Mic"]).await {
-        Ok(_) => info!("[+] PipeShare_Mic set as the default microphone"),
-        Err(e) => warn!("[-] Failed to switch default source: {}", e),
-    }
+    // ─── Step 6: Route targeting applications' recording streams (move-source-output)
+    // Instead of changing the global default microphone (which crashes WebRTC apps like Element),
+    // we find active recording streams (source-inputs) and move them to our virtual mic.
+    move_recording_apps_to_mic("PipeShare_Mic.monitor").await?;
 
-    info!("[+] Audio routing completely initialized!");
+    info!("[+] Audio routing completely initialized without disrupting WebRTC!");
 
     Ok(AudioRoute {
         module_ids,
         target_apps: target_app_names.to_vec(),
-        previous_default_source: prev_source,
+        previous_default_source: prev_source, // Kept for struct consistency, but no longer strictly needed
     })
 }
 
@@ -339,14 +338,7 @@ pub async fn destroy_audio_route(route: &AudioRoute) -> Result<()> {
         }
     }
 
-    // Restore previous default microphone
-    if let Some(ref prev) = route.previous_default_source {
-        match run_pactl(&["set-default-source", prev]).await {
-            Ok(_) => info!("[+] Default microphone restored: {}", prev),
-            Err(e) => warn!("[-] Failed to restore default microphone: {}", e),
-        }
-    }
-
+    /// Restoring default microphone explicitly is no longer needed since we didn't change it.
     info!("[+] Cleanup complete — system returned to normal state");
     Ok(())
 }
@@ -370,6 +362,41 @@ async fn move_app_to_sink(target_app_name: &str, sink_name: &str) -> Result<()> 
                         match run_pactl(&["move-sink-input", id, sink_name]).await {
                             Ok(_) => info!("[+] {} (ID: {}) -> {}", name, id, sink_name),
                             Err(e) => warn!("[-] Failed to move {}: {}", name, e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Moves active recording streams (source-outputs) to our virtual microphone.
+/// This targets WebRTC applications (Element, Discord, Firefox, Chrome) and routes
+/// them silently to `PipeShare_Mic.monitor` without touching the global default microphone.
+async fn move_recording_apps_to_mic(virtual_mic_name: &str) -> Result<()> {
+    let output = run_pactl(&["list", "source-outputs"]).await?;
+    let mut current_id = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        
+        // Find the recording stream ID
+        if trimmed.starts_with("Source Output #") {
+            current_id = trimmed.strip_prefix("Source Output #").map(|s| s.to_string());
+        } 
+        // Identify the application name
+        else if trimmed.starts_with("application.name =") {
+            if let Some(name_str) = trimmed.split('=').nth(1) {
+                let name = name_str.trim().trim_matches('"');
+                
+                // We want to move communication apps that are actively recording.
+                // We exclude system processes or PipeWire's own loops to prevent feedback loops.
+                if !FILTERED_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+                    if let Some(ref id) = current_id {
+                        match run_pactl(&["move-source-output", id, virtual_mic_name]).await {
+                            Ok(_) => info!("[+] Routed recording app '{}' (ID: {}) to {}", name, id, virtual_mic_name),
+                            Err(e) => debug!("[-] Skipping move for recording app {}: {}", name, e),
                         }
                     }
                 }
