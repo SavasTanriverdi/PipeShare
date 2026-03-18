@@ -1,0 +1,25 @@
+[package]
+name = "pipeshare"
+version = "0.1.0"
+edition = "2024"
+description = "Seamless application audio sharing for Linux screen sharing sessions"
+license = "MIT"
+authors = ["Savas"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# D-Bus communication (XDG Portal monitoring)
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Error handling
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization (for config/state)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

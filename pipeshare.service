@@ -1,0 +1,16 @@
+[Unit]
+Description=PipeShare — Seamless Audio Sharing for Linux
+Documentation=https://github.com/savas/pipeshare
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pipeshare daemon
+ExecStop=/usr/local/bin/pipeshare stop
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
