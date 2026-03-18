@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/logo.png" alt="PipeShare Logo" width="200"/>
+</div>
+
 # PipeShare
 
 Seamless application audio routing for Linux screen sharing.
