@@ -330,11 +330,17 @@ async fn move_app_to_appsink(target_app_name: &str) {
         } else if trimmed.starts_with("application.name =") || trimmed.starts_with("node.name =") {
             if let Some(name_str) = trimmed.split('=').nth(1) {
                 let name = name_str.trim().trim_matches('"');
-                if name.to_lowercase().contains(&target_app_name.to_lowercase()) {
+                if name
+                    .to_lowercase()
+                    .contains(&target_app_name.to_lowercase())
+                {
                     if let Some(ref id) = current_id {
                         match run_pactl(&["move-sink-input", id, "PipeShare_AppSink"]).await {
                             Ok(_) => {
-                                info!("[+] Moved '{}' (sink-input {}) to PipeShare_AppSink", name, id);
+                                info!(
+                                    "[+] Moved '{}' (sink-input {}) to PipeShare_AppSink",
+                                    name, id
+                                );
                                 moved += 1;
                             }
                             Err(e) => debug!("[-] Failed to move {}: {}", name, e),

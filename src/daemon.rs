@@ -63,7 +63,10 @@ pub async fn run_daemon() -> Result<()> {
                 // Update the active node ID — even if route exists
                 let old_node = active_node_id.replace(node_id);
                 if old_node.is_some() {
-                    info!("[*] Screen share node replaced: {:?} → {}", old_node, node_id);
+                    info!(
+                        "[*] Screen share node replaced: {:?} → {}",
+                        old_node, node_id
+                    );
                 }
 
                 // If route already exists, just re-link apps (node changed but route is same)
@@ -117,7 +120,10 @@ pub async fn run_daemon() -> Result<()> {
                 // Only clean up if the CURRENT active node stopped.
                 // If an OLD node stopped (replaced by a new one), ignore it.
                 if active_node_id != Some(node_id) {
-                    info!("[*] Ignoring stop for old node {} (current: {:?})", node_id, active_node_id);
+                    info!(
+                        "[*] Ignoring stop for old node {} (current: {:?})",
+                        node_id, active_node_id
+                    );
                     continue;
                 }
 

@@ -18,13 +18,13 @@ No manual PipeWire/PulseAudio configuration needed. It just works.
 4. PipeShare creates a virtual mic that mixes your real mic + selected app audio
 5. When you stop sharing, everything is cleaned up automatically
 
-Under the hood, it uses PipeWire's `pw-link` to create parallel audio taps — your audio keeps playing through your speakers normally while a copy goes to the remote party. You can freely switch between headphones, HDMI, or any other output device while sharing.
+Under the hood, it captures your selected app's audio through a dedicated virtual sink and loops it back to your speakers automatically. You can freely switch between headphones, HDMI, or any other output device while sharing — the loopback follows your default output.
 
 ## Prerequisites
 
 - Linux with Wayland (X11 might work but isn't tested)
 - PipeWire with `pipewire-pulse` and `wireplumber`
-- `pw-link`, `pw-dump`, `pactl` (usually come with PipeWire)
+- `pw-dump`, `pactl` (usually come with PipeWire)
 - `kdialog` or `zenity` for the selection dialog
 - `xdg-desktop-portal` with a working backend (KDE, GNOME, etc.)
 
@@ -68,8 +68,8 @@ pipeshare daemon
 PipeShare manipulates your system's audio routing, so it's fair to ask what it actually does with your microphone and audio streams. Here's the full picture:
 
 **What PipeShare does:**
-- Creates temporary virtual audio devices (`PipeShare_Mix`, `PipeShare_Mic`) *only* when you actively share your screen and confirm through a dialog
-- Routes a copy of your selected application's audio to the virtual mic
+- Creates temporary virtual audio devices (`PipeShare_AppSink`, `PipeShare_Mix`, `PipeShare_Mic`) *only* when you actively share your screen and confirm through a dialog
+- Moves your selected app's audio to a capture sink, then loops it back to your speakers and to the mixer
 - Mixes your real microphone audio into the same virtual mic
 - Moves your communication app's recording input to the virtual mic
 - Cleans up everything when screen sharing stops
@@ -82,7 +82,7 @@ PipeShare manipulates your system's audio routing, so it's fair to ask what it a
 - It does not require root privileges to run (only for installation)
 
 **How to verify:**
-- The source is fully open — read `src/audio.rs` to see exactly which PulseAudio modules are loaded and which `pw-link` connections are made
+- The source is fully open — read `src/audio.rs` to see exactly which PulseAudio modules are loaded
 - Run `pactl list modules short | grep PipeShare` to see active PipeShare modules at any time
 - Run `pw-link -l | grep PipeShare` to see active audio connections
 - All virtual devices are removed when sharing stops or when you run `pipeshare stop`
@@ -91,15 +91,15 @@ If you have microphones on devices you can't physically mute (webcams, game cont
 
 ## Technical details
 
-PipeShare uses a `null-sink` + `remap-source` topology:
+PipeShare uses a `null-sink` + `remap-source` + `module-loopback` topology:
 
 ```
-Your App Audio ──┬──► Your Speakers (unchanged)
-                 └──► PipeShare_Mix ──► PipeShare_Mic ──► Communication App
-Your Real Mic ───────► PipeShare_Mix ↗
+Your App Audio ──► PipeShare_AppSink ──┬──► Loopback → PipeShare_Mix → PipeShare_Mic → Remote
+                                      └──► Loopback → Your Speakers (follows default output)
+Your Real Mic ────────────────────────────► Loopback → PipeShare_Mix ↗
 ```
 
-The `pw-link` connections are non-destructive parallel taps — your app audio keeps flowing to whatever output device you're using. PipeShare doesn't hijack or redirect your audio streams.
+App audio is captured via `pactl move-sink-input` — reliable and persistent. The local playback loopback doesn't specify a target sink, so WirePlumber automatically routes it to your default output and follows device changes.
 
 Screen share detection uses `pw-dump --monitor` which watches PipeWire's graph for new ScreenCast video nodes in real-time, with zero CPU usage while idle.
 
@@ -109,7 +109,7 @@ For more details, see the source code comments in `src/audio.rs` and `src/dbus_m
 
 - Only tested on KDE Plasma (Wayland). GNOME should work but hasn't been tested extensively.
 - The app selection dialog uses `kdialog` by default with `zenity` as fallback.
-- If you switch audio output devices during a share, the audio routing stays intact but the parallel tap may need to be re-established on some configurations.
+- Local playback loopback adds ~30ms latency (not noticeable for most use cases).
 
 ## License
 
