@@ -72,7 +72,9 @@ pub async fn run_daemon() -> Result<()> {
             rx.recv().await
         };
 
-        let Some(event) = event_opt else { break; };
+        let Some(event) = event_opt else {
+            break;
+        };
 
         match event {
             ScreenShareEvent::Started { app_name, node_id } => {
@@ -161,7 +163,9 @@ pub async fn run_daemon() -> Result<()> {
                     continue;
                 }
 
-                info!("[*] Screen Share stopped. Waiting 3s for possible WebRTC renegotiation reconnects...");
+                info!(
+                    "[*] Screen Share stopped. Waiting 3s for possible WebRTC renegotiation reconnects..."
+                );
                 pending_cleanup = true;
             }
         }
