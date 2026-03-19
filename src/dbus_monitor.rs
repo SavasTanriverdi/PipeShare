@@ -1,26 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// PipeShare — Screen Share Detection Engine
-// ─────────────────────────────────────────────────────────────────────────────
-//! Detects screen sharing events in REAL-TIME and EVENT-DRIVEN manner.
-//!
-//! ## Architecture Note
-//!
-//! Wayland's security model prevents 3rd-party applications from accessing
-//! "who is sharing the screen" information via D-Bus. Portal signals
-//! flow only between the requesting application and the portal.
-//!
-//! Therefore, PipeShare uses a two-tiered detection strategy:
-//!
-//! 1. **PipeWire Graph Monitor** (`pw-dump --monitor`):
-//!    PipeWire creates new video stream nodes when screen sharing begins.
-//!    `pw-dump --monitor` reports these changes as JSON INSTANTLY
-//!    (event-driven, no polling!). This robustly detects the presence
-//!    of a genuine ScreenCast session.
-//!
-//! 2. **D-Bus Portal Status Check**:
-//!    Verifies portal existence and accessibility.
-//!    However, due to the third-party monitoring restriction, direct
-//!    monitoring of portal signals is not possible.
+//! Screen share detection using PipeWire graph monitoring and D-Bus portal status.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -30,8 +8,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use zbus::Connection;
-
-// ─── Data Structures ───────────────────────────────────────────────────────────
 
 /// Represents events related to screen sharing.
 #[derive(Debug, Clone)]
@@ -77,8 +53,6 @@ struct PwDumpProps {
     _media_role: Option<String>,
 }
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
 /// Video nodes that are always present and UNRELATED to screen sharing.
 /// We must filter these out to prevent false positives.
 const ALWAYS_PRESENT_NODES: &[&str] = &[
@@ -94,8 +68,6 @@ const SCREENCAST_MEDIA_CLASSES: &[&str] = &[
     "Stream/Output/Video", // ScreenCast source side
 ];
 
-// ─── Main Monitoring Function (Event-Driven) ─────────────────────────────────
-
 /// Monitors the PipeWire graph in REAL-TIME using `pw-dump --monitor`.
 ///
 /// This function **does not poll**. The `pw-dump --monitor` command connects to
@@ -106,13 +78,13 @@ const SCREENCAST_MEDIA_CLASSES: &[&str] = &[
 /// - CPU Usage: ~0% (sleeps while waiting for events, wakes only on changes)
 /// - RAM: ~1 MB (json parse buffer)
 pub async fn monitor_screen_share(tx: mpsc::Sender<ScreenShareEvent>) -> Result<()> {
-    info!("[*] Starting event-based PipeWire monitor...");
+    info!("Starting event-based PipeWire monitor...");
 
     // Understand the current state — is there an active ScreenCast session already?
     let baseline_ids = get_current_screencast_nodes().await?;
     if !baseline_ids.is_empty() {
         info!(
-            "[*] {} initial ScreenCast nodes exist (likely system nodes)",
+            "{} initial ScreenCast nodes exist (likely system nodes)",
             baseline_ids.len()
         );
     }
@@ -124,17 +96,17 @@ pub async fn monitor_screen_share(tx: mpsc::Sender<ScreenShareEvent>) -> Result<
     let mut active_session_ids: HashSet<u32> = HashSet::new();
 
     loop {
-        info!("[*] Launching pw-dump --monitor...");
+        info!("Launching pw-dump --monitor...");
 
         let result =
             run_monitor_loop(&tx, &mut known_screencast_ids, &mut active_session_ids).await;
 
         match result {
             Ok(_) => {
-                warn!("[-] pw-dump --monitor exited unexpectedly, restarting...");
+                warn!("pw-dump --monitor exited unexpectedly, restarting...");
             }
             Err(e) => {
-                error!("[-] PipeWire monitor error: {}", e);
+                error!("PipeWire monitor error: {}", e);
                 error!("    Retrying in 5 seconds...");
             }
         }
@@ -167,7 +139,7 @@ async fn run_monitor_loop(
     let mut bracket_depth: i32 = 0;
     let mut in_array = false;
 
-    info!("[+] PipeWire event flow started — waiting for screen sharing...");
+    info!("PipeWire event flow started — waiting for screen sharing...");
 
     loop {
         let mut line = String::new();
@@ -260,7 +232,7 @@ async fn process_pw_dump_update(
     }
 
     for node_id in removed_ids {
-        info!("[-] Screen sharing STOPPED! node_id={}", node_id);
+        info!("Screen sharing STOPPED! node_id={}", node_id);
         known_ids.remove(&node_id);
         active_session_ids.remove(&node_id);
         let _ = tx.send(ScreenShareEvent::Stopped { node_id }).await;
@@ -294,7 +266,7 @@ async fn process_pw_dump_update(
                 .or_else(|| props.node_name.clone());
 
             info!(
-                "[+] NEW screen sharing detected! node_id={}, app={}, media.class={}",
+                "NEW screen sharing detected! node_id={}, app={}, media.class={}",
                 obj.id,
                 app_name.as_deref().unwrap_or("unknown"),
                 media_class
@@ -347,8 +319,6 @@ async fn get_current_screencast_nodes() -> Result<HashSet<u32>> {
     Ok(ids)
 }
 
-// ─── D-Bus Portal Checks ─────────────────────────────────────────────────────
-
 /// Queries portal availability via D-Bus with thorough checks.
 ///
 /// Verifies:
@@ -367,22 +337,22 @@ pub async fn check_portal_available() -> Result<bool> {
     let mut portal_ok = check_dbus_name(&connection, "org.freedesktop.portal.Desktop").await;
 
     if !portal_ok {
-        info!("[*] XDG Desktop Portal not yet on D-Bus, waiting up to 30s...");
+        info!("XDG Desktop Portal not yet on D-Bus, waiting up to 30s...");
         for i in 1..=30 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             portal_ok = check_dbus_name(&connection, "org.freedesktop.portal.Desktop").await;
             if portal_ok {
-                info!("[+] XDG Desktop Portal appeared after {}s", i);
+                info!("XDG Desktop Portal appeared after {}s", i);
                 break;
             }
         }
     }
 
     if !portal_ok {
-        warn!("[-] XDG Desktop Portal service not found after 30s");
+        warn!("XDG Desktop Portal service not found after 30s");
         return Ok(false);
     }
-    info!("[+] XDG Desktop Portal is active and registered");
+    info!("XDG Desktop Portal is active and registered");
 
     // Check 2: KDE backend (provides ScreenCast)
     // On KDE Plasma/Wayland, this is the backend that handles screen sharing dialogs.
@@ -390,21 +360,21 @@ pub async fn check_portal_available() -> Result<bool> {
     let mut kde_ok = check_dbus_name(&connection, "org.freedesktop.impl.portal.desktop.kde").await;
 
     if !kde_ok {
-        info!("[*] KDE portal backend not yet on D-Bus, waiting up to 15s...");
+        info!("KDE portal backend not yet on D-Bus, waiting up to 15s...");
         for i in 1..=15 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             kde_ok = check_dbus_name(&connection, "org.freedesktop.impl.portal.desktop.kde").await;
             if kde_ok {
-                info!("[+] KDE portal backend appeared after {}s", i);
+                info!("KDE portal backend appeared after {}s", i);
                 break;
             }
         }
     }
 
     if kde_ok {
-        info!("[+] KDE ScreenCast portal backend is available");
+        info!("KDE ScreenCast portal backend is available");
     } else {
-        warn!("[-] KDE portal backend not found — ScreenCast may not work!");
+        warn!("KDE portal backend not found — ScreenCast may not work!");
         warn!("    Screen sharing dialogs may fail to appear.");
         warn!("    Try: systemctl --user restart xdg-desktop-portal.service");
     }
@@ -432,8 +402,6 @@ async fn check_dbus_name(connection: &Connection, bus_name: &str) -> bool {
         }
     }
 }
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

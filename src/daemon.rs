@@ -1,16 +1,5 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// PipeShare — Daemon (Background Service)
-// ─────────────────────────────────────────────────────────────────────────────
-//! The core engine of PipeShare. Runs silently in the background:
-//! 1. Monitors the PipeWire graph event-based (no polling)
-//! 2. Prompts the user when a screen share is detected
-//! 3. Automatically routes selected application audio + mic
-//! 4. Unloads configurations when screen share ceases
-//!
-//! ## Lifecycle
-//! ```text
-//!   [Start] -> [Monitor] -> [Detect] -> [Prompt] -> [Route] -> [Cleanup] -> [Monitor]
-//! ```
+//! PipeShare background daemon.
+//! Monitors the PipeWire graph and routes application audio when screen sharing starts.
 
 use anyhow::Result;
 use std::process::Stdio;
@@ -20,17 +9,13 @@ use tracing::{debug, error, info, warn};
 use crate::audio;
 use crate::dbus_monitor::{self, ScreenShareEvent};
 
-/// The main loop of the daemon — runs as a background service.
-///
-/// This function never returns voluntarily. It stops on Ctrl+C or
-/// a system signal.
+/// Main loop of the background daemon.
 pub async fn run_daemon() -> Result<()> {
-    info!("[*] Starting PipeShare daemon...");
+    info!("Starting PipeShare daemon...");
 
-    // Check system dependencies first
     let portal_ok = dbus_monitor::check_portal_available().await?;
     if !portal_ok {
-        error!("[-] XDG Desktop Portal not found! Daemon cannot operate.");
+        error!("XDG Desktop Portal not found. Daemon cannot operate.");
         anyhow::bail!("XDG Desktop Portal is required");
     }
 
@@ -40,11 +25,11 @@ pub async fn run_daemon() -> Result<()> {
     // Spawn PipeWire monitor component
     tokio::spawn(async move {
         if let Err(e) = dbus_monitor::monitor_screen_share(tx).await {
-            error!("[-] PipeWire monitor error: {}", e);
+            error!("PipeWire monitor error: {}", e);
         }
     });
 
-    info!("[+] Daemon ready — standing by for screen share sequences...");
+    info!("Daemon ready, standing by...");
 
     // Track active audio routing
     let mut active_route: Option<audio::AudioRoute> = None;
@@ -58,7 +43,7 @@ pub async fn run_daemon() -> Result<()> {
                 Ok(Some(e)) => Some(e),
                 Ok(None) => None,
                 Err(_) => {
-                    info!("[*] Cleanup timeout reached. Destroying audio route.");
+                    info!("Cleanup timeout reached. Destroying audio route.");
                     if let Some(route) = active_route.take() {
                         let _ = audio::destroy_audio_route(&route).await;
                         // Removed the annoying "Audio Share Terminated" notification as requested
@@ -79,7 +64,7 @@ pub async fn run_daemon() -> Result<()> {
         match event {
             ScreenShareEvent::Started { app_name, node_id } => {
                 if pending_cleanup {
-                    info!("[*] Reconnect detected within 3s timeout! Cancelling cleanup.");
+                    info!("Reconnect detected within 3s timeout. Cancelling cleanup.");
                     pending_cleanup = false;
                     if let Some(ref route) = active_route {
                         for app in &route.target_apps {
@@ -92,22 +77,18 @@ pub async fn run_daemon() -> Result<()> {
 
                 let detected_name = app_name.unwrap_or_else(|| "Unknown".to_string());
                 info!(
-                    "[+] Screen share detected via app={}, node={}",
+                    "Screen share detected via app={}, node={}",
                     detected_name, node_id
                 );
 
-                // Update the active node ID — even if route exists
+                // Update the active node ID
                 let old_node = active_node_id.replace(node_id);
                 if old_node.is_some() {
-                    info!(
-                        "[*] Screen share node replaced: {:?} → {}",
-                        old_node, node_id
-                    );
+                    info!("Screen share node replaced: {:?} -> {}", old_node, node_id);
                 }
 
-                // If route already exists, just re-link apps (node changed but route is same)
                 if active_route.is_some() {
-                    info!("[*] Audio route already active, re-linking apps for new node");
+                    info!("Audio route already active, re-linking apps for new node");
                     if let Some(ref route) = active_route {
                         for app in &route.target_apps {
                             let _ = audio::relink_app_to_mix(app).await;
@@ -116,10 +97,9 @@ pub async fn run_daemon() -> Result<()> {
                     continue;
                 }
 
-                // Ask the user which application audio to share
                 match ask_user_for_audio_source().await {
                     Ok(Some(selected_apps)) => {
-                        info!("[*] User selection: {:?}", selected_apps);
+                        info!("User selection: {:?}", selected_apps);
                         match audio::create_audio_route(&selected_apps).await {
                             Ok(route) => {
                                 send_notification(
@@ -133,7 +113,7 @@ pub async fn run_daemon() -> Result<()> {
                                 active_route = Some(route);
                             }
                             Err(e) => {
-                                error!("[-] Route creation failed: {}", e);
+                                error!("Route creation failed: {}", e);
                                 send_notification(
                                     "Error",
                                     &format!("Route creation failed: {}", e),
@@ -143,29 +123,27 @@ pub async fn run_daemon() -> Result<()> {
                         }
                     }
                     Ok(None) => {
-                        info!("[-] User rejected/cancelled audio sharing request");
+                        info!("User rejected/cancelled audio sharing request");
                     }
                     Err(e) => {
-                        warn!("[-] Dialog display failure: {}", e);
+                        warn!("Dialog display failure: {}", e);
                     }
                 }
             }
             ScreenShareEvent::Stopped { node_id } => {
-                info!("[-] Screen Share ceased (node: {})", node_id);
+                info!("Screen Share ceased (node: {})", node_id);
 
                 // Only clean up if the CURRENT active node stopped.
                 // If an OLD node stopped (replaced by a new one), ignore it.
                 if active_node_id != Some(node_id) {
                     info!(
-                        "[*] Ignoring stop for old node {} (current: {:?})",
+                        "Ignoring stop for old node {} (current: {:?})",
                         node_id, active_node_id
                     );
                     continue;
                 }
 
-                info!(
-                    "[*] Screen Share stopped. Waiting 3s for possible WebRTC renegotiation reconnects..."
-                );
+                info!("Screen Share stopped. Waiting 3s for reconnects...");
                 pending_cleanup = true;
             }
         }
@@ -173,8 +151,6 @@ pub async fn run_daemon() -> Result<()> {
 
     Ok(())
 }
-
-// ─── Dialog and Notification Entities ────────────────────────────────────────
 
 /// Posts desktop notification via `notify-send`.
 async fn send_notification(title: &str, body: &str) {
@@ -193,17 +169,11 @@ async fn send_notification(title: &str, body: &str) {
         .await;
 
     if let Err(e) = result {
-        warn!("[-] Failed to execute notify-send: {}", e);
+        warn!("Failed to execute notify-send: {}", e);
     }
 }
 
 /// Prompts the user with a dialog to pick applications to broadcast audio for.
-/// (Relies on KDE dialog utility `kdialog` mapped via Zenity, if the latter is present)
-///
-/// Returns:
-/// - `Ok(Some(vec))` — Apps were selected
-/// - `Ok(None)` — Denied or aborted
-/// - `Err(_)` — Fallback / Display error
 async fn ask_user_for_audio_source() -> Result<Option<Vec<String>>> {
     // Collect available system audio sources
     let sources = audio::list_audio_sources().await?;

@@ -1,16 +1,12 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// PipeShare — Seamless Audio Sharing for Linux
-// ─────────────────────────────────────────────────────────────────────────────
-//! A modern, lightweight background service for Linux that seamlessly
-//! shares application audio during screen sharing sessions.
+//! Background service for sharing application audio during screen sharing sessions.
 //!
 //! Usage:
-//!   pipeshare daemon         — Start as a background service (primary mode)
-//!   pipeshare list           — List audio-producing applications
-//!   pipeshare route <app>    — Manually route audio
-//!   pipeshare stop           — Stop all active routes
-//!   pipeshare status         — Display system status
-//!   pipeshare monitor        — Monitor screen sharing events live
+//!   pipeshare daemon         - Start the background service
+//!   pipeshare list           - List audio-producing applications
+//!   pipeshare route <app>    - Manually route audio
+//!   pipeshare stop           - Stop active routes
+//!   pipeshare status         - Display system status
+//!   pipeshare monitor        - Monitor screen sharing events
 
 mod audio;
 mod daemon;
@@ -20,16 +16,12 @@ use anyhow::Result;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
-// ─── Banner ──────────────────────────────────────────────────────────────────
-
 const BANNER: &str = r#"
 ================================================================================
   PipeShare v0.2.1
   Seamless Audio Sharing for Linux
 ================================================================================
 "#;
-
-// ─── Main Entry ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,23 +61,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// ─── Commands ────────────────────────────────────────────────────────────────
-
-/// `pipeshare daemon` — Primary mode: runs as a background service.
-///
-/// Monitors the PipeWire graph, displays a dialog to the user when screen sharing
-/// is detected, routes audio, and cleans up when sharing stops.
+/// Primary mode: runs as a background service.
 async fn cmd_daemon() -> Result<()> {
     println!("{}", BANNER);
-    println!("[*] Starting daemon mode...\n");
+    println!("Starting daemon...\n");
 
-    // Graceful shutdown on Ctrl+C
     let shutdown = tokio::spawn(async {
         tokio::signal::ctrl_c().await.ok();
-        println!("\n[*] Shutting down daemon...");
-        // Cleanup
+        println!("Shutting down daemon...");
         let _ = audio::cleanup_all().await;
-        println!("[+] Clean shutdown completed.");
+        println!("Clean shutdown completed.");
         std::process::exit(0);
     });
 
@@ -102,16 +87,16 @@ async fn cmd_daemon() -> Result<()> {
     Ok(())
 }
 
-/// `pipeshare list` — Lists active audio sources.
+/// Lists active audio sources.
 async fn cmd_list() -> Result<()> {
     println!("{}", BANNER);
-    println!("[*] Scanning system for audio-producing applications...\n");
+    println!("Scanning for audio-producing applications...\n");
 
     let sources = audio::list_audio_sources().await?;
 
     if sources.is_empty() {
-        println!("[-] No audio-producing applications found currently.");
-        println!("    Hint: Start playing a video in a browser or open a music player.");
+        println!("No audio-producing applications found.");
+        println!("Hint: Start playing a video in a browser or open a music player.");
     } else {
         println!("  ┌─────┬────────────────────────────────────┐");
         println!("  │  #  │ Application                        │");
@@ -130,50 +115,45 @@ async fn cmd_list() -> Result<()> {
     Ok(())
 }
 
-/// `pipeshare route <app>` — Manual audio routing.
+/// Manual audio routing.
 async fn cmd_route(app_name: &str) -> Result<()> {
     println!("{}", BANNER);
-    println!("[*] Initializing manual audio routing for: {}\n", app_name);
+    println!("Initializing manual audio routing for: {}\n", app_name);
 
     let route = audio::create_audio_route_single(app_name).await?;
 
-    println!();
-    println!("[+] Audio routing ACTIVE");
-    println!("    Source:   {}", app_name);
-    println!("    Mic:      Mixed (System microphone + Application audio)");
-    println!("    Target:   PipeShare_Mic (Set as the default microphone)");
-    println!();
-    println!("    Note: Your communication app (e.g., Discord/Element) should now");
-    println!("          automatically use 'PipeShare_Mic'.");
-    println!();
-    println!("    Press Ctrl+C or run 'pipeshare stop' to terminate.");
+    println!("\nRouting active:");
+    println!("  Source: {}", app_name);
+    println!("  Mic:    Mixed (System microphone + Application audio)");
+    println!("  Target: PipeShare_Mic (Set as the default microphone)\n");
+    println!("Your communication app should now automatically use 'PipeShare_Mic'.");
+    println!("Press Ctrl+C or run 'pipeshare stop' to terminate.");
 
-    // Wait for Ctrl+C to trigger cleanup
     tokio::signal::ctrl_c().await?;
 
-    println!("\n\n[*] Stopping routing...");
+    println!("\nStopping routing...");
     audio::destroy_audio_route(&route).await?;
 
     Ok(())
 }
 
-/// `pipeshare stop` — Cleans up all PipeShare modules.
+/// Cleans up all PipeShare modules.
 async fn cmd_stop() -> Result<()> {
     println!("{}", BANNER);
-    println!("[*] Cleaning up PipeShare virtual devices...\n");
+    println!("Cleaning up PipeShare virtual devices...\n");
 
     let cleaned = audio::cleanup_all().await?;
 
     if cleaned == 0 {
-        println!("[-] No active PipeShare modules found to clean.");
+        println!("No active PipeShare modules found to clean.");
     } else {
-        println!("\n[+] Successfully cleaned {} module(s).", cleaned);
+        println!("Successfully cleaned {} module(s).", cleaned);
     }
 
     Ok(())
 }
 
-/// `pipeshare status` — Displays system status and dependencies.
+/// Displays system status and dependencies.
 async fn cmd_status() -> Result<()> {
     println!("{}", BANNER);
     println!("System Status\n");
@@ -187,9 +167,9 @@ async fn cmd_status() -> Result<()> {
         Ok(out) => {
             let ver = String::from_utf8_lossy(&out.stdout);
             let version_line = ver.lines().last().unwrap_or("unknown");
-            println!("  [+] PipeWire       : {}", version_line.trim());
+            println!("  PipeWire       : {}", version_line.trim());
         }
-        Err(_) => println!("  [-] PipeWire       : Not found!"),
+        Err(_) => println!("  PipeWire       : Not found!"),
     }
 
     // WirePlumber
@@ -198,8 +178,8 @@ async fn cmd_status() -> Result<()> {
         .output()
         .await;
     match wp {
-        Ok(out) if out.status.success() => println!("  [+] WirePlumber    : Active"),
-        _ => println!("  [-] WirePlumber    : Not found"),
+        Ok(out) if out.status.success() => println!("  WirePlumber    : Active"),
+        _ => println!("  WirePlumber    : Not found"),
     }
 
     // XDG Portal
@@ -218,9 +198,9 @@ async fn cmd_status() -> Result<()> {
     match kd {
         Ok(out) if out.status.success() => {
             let ver = String::from_utf8_lossy(&out.stdout);
-            println!("  [+] kdialog        : {}", ver.trim());
+            println!("  kdialog        : {}", ver.trim());
         }
-        _ => println!("  [-] kdialog        : Not found (dialog prompts will fail back)"),
+        _ => println!("  kdialog        : Not found (dialog prompts will fail back)"),
     }
 
     // pactl
@@ -231,9 +211,9 @@ async fn cmd_status() -> Result<()> {
     match pactl {
         Ok(out) => {
             let ver = String::from_utf8_lossy(&out.stdout);
-            println!("  [+] pactl          : {}", ver.trim());
+            println!("  pactl          : {}", ver.trim());
         }
-        Err(_) => println!("  [-] pactl          : Not found"),
+        Err(_) => println!("  pactl          : Not found"),
     }
 
     // Active PipeShare sessions
@@ -252,18 +232,17 @@ async fn cmd_status() -> Result<()> {
         }
     }
     if active == 0 {
-        println!("  [-] No active PipeShare sessions detected.");
+        println!("  No active PipeShare sessions detected.");
     }
 
     Ok(())
 }
 
-/// `pipeshare monitor` — Live monitor for screen sharing events via D-Bus.
+/// Live monitor for screen sharing events via D-Bus.
 async fn cmd_monitor() -> Result<()> {
     println!("{}", BANNER);
-    println!("[*] Starting event-based screen sharing monitor...");
-    println!("    (No polling — sleeps until graph changes)");
-    println!("    Press Ctrl+C to stop.\n");
+    println!("Starting event-based screen sharing monitor...");
+    println!("Press Ctrl+C to stop.\n");
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
@@ -295,17 +274,17 @@ async fn cmd_monitor() -> Result<()> {
     Ok(())
 }
 
-/// `pipeshare help` — Display help information.
+/// Display help information.
 fn cmd_help() {
     println!("{}", BANNER);
     println!("Usage: pipeshare <command> [options]\n");
     println!("Commands:");
-    println!("  daemon            Start as a background service (primary mode)");
+    println!("  daemon            Start background service");
     println!("  list              List audio-producing applications");
     println!("  route <app>       Start manual audio routing");
-    println!("  stop              Stop all routing and clean up virtualization");
-    println!("  status            Display system state and dependencies");
-    println!("  monitor           Monitor screen sharing events live");
+    println!("  stop              Stop routing and clean up");
+    println!("  status            Display system state");
+    println!("  monitor           Monitor screen sharing events");
     println!("  help              Display this help message");
     println!();
     println!("Examples:");
@@ -320,8 +299,6 @@ fn cmd_help() {
     println!("Environment Variables:");
     println!("  RUST_LOG=debug    Enable verbose logging");
 }
-
-// ─── Utilities ───────────────────────────────────────────────────────────────
 
 fn chrono_now() -> String {
     use std::time::SystemTime;

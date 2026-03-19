@@ -1,27 +1,12 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// PipeShare — Audio Routing Engine
-// ─────────────────────────────────────────────────────────────────────────────
+//! PipeShare Audio Routing Engine
 //! Creates virtual audio devices via PipeWire-Pulse interface, mixing
 //! application audio and real microphone audio into a single virtual microphone.
-//!
-//! ## Audio Flow
-//! ```text
-//!   Firefox Audio ──┐
-//!                   ├──► [PipeShare_Mix Sink] ──► .monitor ──► Virtual Mic
-//!   Real Microphone ┘                                              │
-//!                                                                  ▼
-//!                                                          Discord/Element
-//! ```
-//!
-//! This ensures the remote party hears both your voice and application audio.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
-
-// ─── Data Structures ───────────────────────────────────────────────────────────
 
 /// Represents an audio node found in PipeWire.
 #[derive(Debug, Clone)]
@@ -44,8 +29,6 @@ pub struct AudioRoute {
     /// Previous default source prior to routing (to restore later)
     pub previous_default_source: Option<String>,
 }
-
-// ─── PipeWire Helpers ───────────────────────────────────────────────────────
 
 /// Executes the `pw-link` command.
 async fn run_pw_link(args: &[&str]) -> Result<String> {
@@ -87,8 +70,6 @@ async fn run_pactl(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-// ─── Filters ─────────────────────────────────────────────────────────────────
-
 /// System hardware/internal nodes prefixes to filter out.
 const FILTERED_PREFIXES: &[&str] = &[
     "pipewire",
@@ -102,8 +83,6 @@ const FILTERED_PREFIXES: &[&str] = &[
     "kwin_",
     "xdg-desktop-portal",
 ];
-
-// ─── Main Functions ──────────────────────────────────────────────────────────
 
 /// Lists applications currently producing audio on the system.
 pub async fn list_audio_sources() -> Result<Vec<AudioNode>> {
@@ -176,29 +155,17 @@ async fn get_default_sink() -> Result<String> {
 
 /// Creates a complete audio route combining selected applications' audio
 /// and the real microphone.
-///
-/// ## Architecture (AppSink + Auto-Routing Loopback)
-///
-/// ```text
-/// App Audio ──► PipeShare_AppSink ──┬──► Loopback → PipeShare_Mix → PipeShare_Mic → Remote
-///                                  └──► Loopback → (auto) → User's Speaker
-/// Real Mic ────────────────────────────► Loopback → PipeShare_Mix ↗
-/// ```
-///
-/// move-sink-input captures the app's audio reliably (no WirePlumber conflicts).
-/// The local playback loopback has NO sink specified — WirePlumber auto-routes
-/// it to the default output and follows device changes (HyperX ↔ GA104 HDMI etc.)
 pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRoute> {
     let mut module_ids: Vec<u32> = Vec::new();
 
     let prev_source = get_default_source().await.ok();
 
     info!(
-        "[*] Current default microphone: {}",
+        "Current default microphone: {}",
         prev_source.as_deref().unwrap_or("unknown")
     );
 
-    // ─── Step 1: Create PipeShare_AppSink (captures app audio) ──────────
+    // Step 1: Create PipeShare_AppSink
     let appsink_id = run_pactl(&[
         "load-module",
         "module-null-sink",
@@ -210,9 +177,9 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     if let Ok(mid) = appsink_id.trim().parse::<u32>() {
         module_ids.push(mid);
     }
-    info!("[+] PipeShare_AppSink created");
+    info!("PipeShare_AppSink created");
 
-    // ─── Step 2: Create PipeShare_Mix (mixer) ───────────────────────────
+    // Step 2: Create PipeShare_Mix
     let mix_id = run_pactl(&[
         "load-module",
         "module-null-sink",
@@ -224,11 +191,11 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     if let Ok(mid) = mix_id.trim().parse::<u32>() {
         module_ids.push(mid);
     }
-    info!("[+] PipeShare_Mix created");
+    info!("PipeShare_Mix created");
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // ─── Step 3: Create Virtual Microphone (Remap Source) ───────────────
+    // Step 3: Create Virtual Microphone
     let mic_id = run_pactl(&[
         "load-module",
         "module-remap-source",
@@ -240,11 +207,11 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     if let Ok(mid) = mic_id.trim().parse::<u32>() {
         module_ids.push(mid);
     }
-    info!("[+] PipeShare_Mic virtual microphone created");
+    info!("PipeShare_Mic virtual microphone created");
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // ─── Step 4: Real microphone → PipeShare_Mix ────────────────────────
+    // Step 4: Real microphone -> PipeShare_Mix
     if let Some(ref mic) = prev_source {
         if let Ok(id) = run_pactl(&[
             "load-module",
@@ -259,10 +226,10 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
                 module_ids.push(mid);
             }
         }
-        info!("[+] Microphone loopback to PipeShare_Mix established");
+        info!("Microphone loopback to PipeShare_Mix established");
     }
 
-    // ─── Step 5: AppSink.monitor → PipeShare_Mix (remote hears app) ─────
+    // Step 5: AppSink.monitor -> PipeShare_Mix
     if let Ok(id) = run_pactl(&[
         "load-module",
         "module-loopback",
@@ -276,11 +243,9 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
             module_ids.push(mid);
         }
     }
-    info!("[+] App audio → PipeShare_Mix loopback established");
+    info!("App audio → PipeShare_Mix loopback established");
 
-    // ─── Step 6: AppSink.monitor → User's Speaker (LOCAL PLAYBACK) ──────
-    // NO sink specified! WirePlumber auto-routes to the default output
-    // and follows device changes (HyperX ↔ GA104 HDMI etc.)
+    // Step 6: AppSink.monitor -> User's Speaker
     if let Ok(id) = run_pactl(&[
         "load-module",
         "module-loopback",
@@ -293,19 +258,19 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
             module_ids.push(mid);
         }
     }
-    info!("[+] Local playback loopback established (follows default output)");
+    info!("Local playback loopback established (follows default output)");
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // ─── Step 7: Move app audio to PipeShare_AppSink ────────────────────
+    // Step 7: Move app audio to PipeShare_AppSink
     for app_name in target_app_names {
         move_app_to_appsink(app_name).await;
     }
 
-    // ─── Step 8: Route recording streams to PipeShare_Mic ───────────────
+    // Step 8: Route recording streams to PipeShare_Mic
     move_recording_apps_to_mic("PipeShare_Mic.monitor").await?;
 
-    info!("[+] Audio routing initialized — output device switching is fully supported!");
+    info!("Audio routing initialized — output device switching is fully supported!");
 
     Ok(AudioRoute {
         module_ids,
@@ -337,13 +302,10 @@ async fn move_app_to_appsink(target_app_name: &str) {
                     if let Some(ref id) = current_id {
                         match run_pactl(&["move-sink-input", id, "PipeShare_AppSink"]).await {
                             Ok(_) => {
-                                info!(
-                                    "[+] Moved '{}' (sink-input {}) to PipeShare_AppSink",
-                                    name, id
-                                );
+                                info!("Moved '{}' (sink-input {}) to PipeShare_AppSink", name, id);
                                 moved += 1;
                             }
-                            Err(e) => debug!("[-] Failed to move {}: {}", name, e),
+                            Err(e) => debug!("Failed to move {}: {}", name, e),
                         }
                     }
                 }
@@ -352,7 +314,7 @@ async fn move_app_to_appsink(target_app_name: &str) {
     }
 
     if moved == 0 {
-        warn!("[-] No sink-inputs found for '{}'", target_app_name);
+        warn!("No sink-inputs found for '{}'", target_app_name);
     }
 }
 
@@ -363,12 +325,6 @@ pub async fn relink_app_to_mix(target_app_name: &str) -> Result<()> {
 }
 
 /// Creates parallel audio links from an application to PipeShare_Mix via `pw-link`.
-///
-/// This is **non-destructive**: the app keeps its original audio output.
-/// Audio flows to BOTH the user's chosen speaker AND PipeShare_Mix for remote sharing.
-///
-/// When the user switches output devices (e.g. HyperX → GA104 HDMI),
-/// only the original connection changes. The parallel link to PipeShare_Mix persists.
 async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
     // Get all output ports in the PipeWire graph
     let output_ports = run_pw_link(&["-o"]).await?;
@@ -390,15 +346,12 @@ async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
         .collect();
 
     if app_ports.is_empty() {
-        warn!(
-            "[-] No audio output ports found for '{}' — app may not be producing audio yet",
-            target_app_name
-        );
+        warn!("No audio output ports found for '{}'", target_app_name);
         return Ok(());
     }
 
     info!(
-        "[*] Found {} output ports for '{}'",
+        "Found {} output ports for '{}'",
         app_ports.len(),
         target_app_name
     );
@@ -420,13 +373,13 @@ async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
         };
 
         match run_pw_link(&[port, mix_target]).await {
-            Ok(_) => info!("[+] {} → {} (parallel link)", port, mix_target),
-            Err(e) => warn!("[-] Failed to link {}: {}", port, e),
+            Ok(_) => info!("{} → {} (parallel link)", port, mix_target),
+            Err(e) => warn!("Failed to link {}: {}", port, e),
         }
     }
 
     info!(
-        "[+] {} audio tapped successfully — output device remains user-controlled",
+        "{} audio tapped successfully — output device remains user-controlled",
         target_app_name
     );
     Ok(())
@@ -462,10 +415,10 @@ async fn move_recording_apps_to_mic(virtual_mic_name: &str) -> Result<()> {
                     if let Some(ref id) = current_id {
                         match run_pactl(&["move-source-output", id, virtual_mic_name]).await {
                             Ok(_) => info!(
-                                "[+] Routed recording app '{}' (ID: {}) to {}",
+                                "Routed recording app '{}' (ID: {}) to {}",
                                 name, id, virtual_mic_name
                             ),
-                            Err(e) => debug!("[-] Skipping move for recording app {}: {}", name, e),
+                            Err(e) => debug!("Skipping move for recording app {}: {}", name, e),
                         }
                     }
                 }
@@ -486,7 +439,7 @@ pub async fn create_audio_route_single(target_app_name: &str) -> Result<AudioRou
 /// 2. Unloads all PipeShare PulseAudio modules
 /// 3. pw-link connections auto-disconnect when the null-sink is destroyed
 pub async fn destroy_audio_route(route: &AudioRoute) -> Result<()> {
-    info!("[*] Cleaning up audio route for: {:?}", route.target_apps);
+    info!("Cleaning up audio route for: {:?}", route.target_apps);
 
     // CRITICAL: Restore recording streams BEFORE destroying modules.
     // If we destroy PipeShare_Mic first, Element's WebRTC source-output
@@ -497,12 +450,12 @@ pub async fn destroy_audio_route(route: &AudioRoute) -> Result<()> {
     // Unload modules in reverse order (dependency order)
     for module_id in route.module_ids.iter().rev() {
         match run_pactl(&["unload-module", &module_id.to_string()]).await {
-            Ok(_) => info!("[-] Module {} unloaded", module_id),
-            Err(e) => error!("[-] Failed to unload module {}: {}", module_id, e),
+            Ok(_) => info!("Module {} unloaded", module_id),
+            Err(e) => error!("Failed to unload module {}: {}", module_id, e),
         }
     }
 
-    info!("[+] Cleanup complete — system returned to normal state");
+    info!("Cleanup complete.");
     Ok(())
 }
 
@@ -512,7 +465,7 @@ async fn restore_recording_streams_to_default() {
     let default_source = match get_default_source().await {
         Ok(s) => s,
         Err(_) => {
-            warn!("[-] Could not determine default source for restoration");
+            warn!("Could not determine default source for restoration");
             return;
         }
     };
@@ -534,8 +487,8 @@ async fn restore_recording_streams_to_default() {
             // This source-output is connected to a PipeShare source — restore it
             if let Some(ref id) = current_id {
                 match run_pactl(&["move-source-output", id, &default_source]).await {
-                    Ok(_) => info!("[+] Restored recording stream {} to {}", id, default_source),
-                    Err(e) => debug!("[-] Could not restore stream {}: {}", id, e),
+                    Ok(_) => info!("Restored recording stream {} to {}", id, default_source),
+                    Err(e) => debug!("Could not restore stream {}: {}", id, e),
                 }
             }
         }
@@ -561,7 +514,7 @@ pub async fn cleanup_all() -> Result<u32> {
                     .args(["unload-module", id_str])
                     .output()
                     .await;
-                info!("[-] Module {} unloaded", id_str);
+                info!("Module {} unloaded", id_str);
                 cleaned += 1;
             }
         }
@@ -579,7 +532,7 @@ pub async fn cleanup_all() -> Result<u32> {
         if line.contains("alsa_input") && !line.contains("PipeShare") {
             if let Some(name) = line.split_whitespace().nth(1) {
                 let _ = run_pactl(&["set-default-source", name]).await;
-                info!("[+] Default microphone restored: {}", name);
+                info!("Default microphone restored: {}", name);
                 break;
             }
         }
@@ -587,8 +540,6 @@ pub async fn cleanup_all() -> Result<u32> {
 
     Ok(cleaned)
 }
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
