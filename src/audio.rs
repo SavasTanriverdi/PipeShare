@@ -177,6 +177,8 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     if let Ok(mid) = appsink_id.trim().parse::<u32>() {
         module_ids.push(mid);
     }
+    let _ = run_pactl(&["set-sink-mute", "PipeShare_AppSink", "0"]).await;
+    let _ = run_pactl(&["set-sink-volume", "PipeShare_AppSink", "100%"]).await;
     info!("PipeShare_AppSink created");
 
     // Step 2: Create PipeShare_Mix
@@ -191,25 +193,11 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     if let Ok(mid) = mix_id.trim().parse::<u32>() {
         module_ids.push(mid);
     }
+    let _ = run_pactl(&["set-sink-mute", "PipeShare_Mix", "0"]).await;
+    let _ = run_pactl(&["set-sink-volume", "PipeShare_Mix", "100%"]).await;
     info!("PipeShare_Mix created");
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Step 3: Create Virtual Microphone
-    let mic_id = run_pactl(&[
-        "load-module",
-        "module-remap-source",
-        "source_name=PipeShare_Mic",
-        "master=PipeShare_Mix.monitor",
-        r#"source_properties="device.description=PipeShare_Mic device.class=filter node.virtual=true""#,
-    ])
-    .await?;
-    if let Ok(mid) = mic_id.trim().parse::<u32>() {
-        module_ids.push(mid);
-    }
-    info!("PipeShare_Mic virtual microphone created");
-
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // Step 4: Real microphone -> PipeShare_Mix
     if let Some(ref mic) = prev_source {
@@ -246,13 +234,20 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     info!("App audio → PipeShare_Mix loopback established");
 
     // Step 6: AppSink.monitor -> User's Speaker
-    if let Ok(id) = run_pactl(&[
+    let default_sink = get_default_sink().await.ok();
+    let sink_arg = default_sink.map(|s| format!("sink={}", s));
+    
+    let mut args = vec![
         "load-module",
         "module-loopback",
         "source=PipeShare_AppSink.monitor",
         "latency_msec=30",
-    ])
-    .await
+    ];
+    if let Some(ref s) = sink_arg {
+        args.push(s);
+    }
+    
+    if let Ok(id) = run_pactl(&args).await
     {
         if let Ok(mid) = id.trim().parse::<u32>() {
             module_ids.push(mid);
@@ -267,8 +262,8 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
         move_app_to_appsink(app_name).await;
     }
 
-    // Step 8: Route recording streams to PipeShare_Mic
-    move_recording_apps_to_mic("PipeShare_Mic.monitor").await?;
+    // Step 8: Route recording streams to the Mix monitor directly
+    move_recording_apps_to_mic("PipeShare_Mix.monitor").await?;
 
     info!("Audio routing initialized — output device switching is fully supported!");
 
