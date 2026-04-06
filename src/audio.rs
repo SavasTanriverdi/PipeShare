@@ -383,7 +383,7 @@ async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
 /// Moves active recording streams (source-outputs) to our virtual microphone.
 /// This targets WebRTC applications (Element, Discord, Firefox, Chrome) and routes
 /// them silently to `PipeShare_Mic.monitor` without touching the global default microphone.
-async fn move_recording_apps_to_mic(virtual_mic_name: &str) -> Result<()> {
+pub async fn move_recording_apps_to_mic(virtual_mic_name: &str) -> Result<()> {
     let output = run_pactl(&["list", "source-outputs"]).await?;
     let mut current_id = None;
 

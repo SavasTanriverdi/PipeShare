@@ -70,6 +70,7 @@ pub async fn run_daemon() -> Result<()> {
                         for app in &route.target_apps {
                             let _ = audio::relink_app_to_mix(app).await;
                         }
+                        let _ = audio::move_recording_apps_to_mic("PipeShare_Mix.monitor").await;
                     }
                     active_node_id = Some(node_id);
                     continue;
@@ -93,6 +94,7 @@ pub async fn run_daemon() -> Result<()> {
                         for app in &route.target_apps {
                             let _ = audio::relink_app_to_mix(app).await;
                         }
+                        let _ = audio::move_recording_apps_to_mic("PipeShare_Mix.monitor").await;
                     }
                     continue;
                 }
