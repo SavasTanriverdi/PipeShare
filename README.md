@@ -64,6 +64,27 @@ flowchart LR
 
 ## Installation
 
+### Arch Linux (AUR)
+
+`ash
+# Using yay
+yay -S pipeshare
+
+# Or install manually via PKGBUILD
+git clone https://aur.archlinux.org/pipeshare.git
+cd pipeshare
+makepkg -si
+`
+
+### Pre-built Binary
+
+Download the latest x86_64 tarball from [Releases](https://github.com/SavasTanriverdi/PipeShare/releases):
+
+`ash
+tar -xzvf pipeshare-*-x86_64-unknown-linux-gnu.tar.gz
+sudo install -Dm755 pipeshare /usr/local/bin/pipeshare
+`
+
 ### Build from Source
 
 ```bash
