@@ -1,10 +1,15 @@
 [package]
 name = "pipeshare"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-description = "Seamless application audio sharing for Linux screen sharing sessions"
+description = "Seamless, event-driven application audio routing for Linux/Wayland screen sharing sessions"
 license = "MIT"
-authors = ["Savas"]
+authors = ["Savas Tanriverdi <savastnr@duck.com>"]
+repository = "https://github.com/SavasTanriverdi/PipeShare"
+homepage = "https://github.com/SavasTanriverdi/PipeShare"
+readme = "README.md"
+keywords = ["pipewire", "wayland", "audio", "screencast", "linux"]
+categories = ["multimedia::audio", "os::linux-apis", "command-line-utilities"]
 
 [dependencies]
 # Async runtime
