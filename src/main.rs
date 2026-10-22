@@ -2,11 +2,12 @@
 //!
 //! Usage:
 //!   pipeshare daemon         - Start the background service
-//!   pipeshare list           - List audio-producing applications
+//!   pipeshare list [--json]  - List audio-producing applications
 //!   pipeshare route <app>    - Manually route audio
 //!   pipeshare stop           - Stop active routes
 //!   pipeshare status         - Display system status
 //!   pipeshare monitor        - Monitor screen sharing events
+//!   pipeshare version        - Print version information
 
 mod audio;
 mod daemon;
@@ -16,12 +17,14 @@ use anyhow::Result;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
-const BANNER: &str = r#"
-================================================================================
-  PipeShare v0.2.1
-  Seamless Audio Sharing for Linux
-================================================================================
-"#;
+fn print_banner() {
+    println!();
+    println!("================================================================================");
+    println!("  PipeShare v{}", env!("CARGO_PKG_VERSION"));
+    println!("  Seamless Audio Sharing for Linux/Wayland");
+    println!("================================================================================");
+    println!();
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,10 +38,11 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(String::as_str).unwrap_or("help");
+    let json_flag = args.iter().any(|arg| arg == "--json" || arg == "-j");
 
     match command {
         "daemon" | "start" => cmd_daemon().await?,
-        "list" => cmd_list().await?,
+        "list" => cmd_list(json_flag).await?,
         "route" => {
             let app_name = args.get(2).map(String::as_str).unwrap_or_else(|| {
                 eprintln!("Error: Usage: pipeshare route <application_name>");
@@ -50,6 +54,9 @@ async fn main() -> Result<()> {
         "stop" => cmd_stop().await?,
         "status" => cmd_status().await?,
         "monitor" => cmd_monitor().await?,
+        "version" | "--version" | "-V" => {
+            println!("pipeshare {}", env!("CARGO_PKG_VERSION"));
+        }
         "help" | "--help" | "-h" => cmd_help(),
         _ => {
             eprintln!("Error: Unknown command: '{}'", command);
@@ -63,7 +70,7 @@ async fn main() -> Result<()> {
 
 /// Primary mode: runs as a background service.
 async fn cmd_daemon() -> Result<()> {
-    println!("{}", BANNER);
+    print_banner();
     println!("Starting daemon...\n");
 
     let shutdown = tokio::spawn(async {
@@ -88,23 +95,29 @@ async fn cmd_daemon() -> Result<()> {
 }
 
 /// Lists active audio sources.
-async fn cmd_list() -> Result<()> {
-    println!("{}", BANNER);
-    println!("Scanning for audio-producing applications...\n");
-
+async fn cmd_list(json_output: bool) -> Result<()> {
     let sources = audio::list_audio_sources().await?;
+
+    if json_output {
+        let names: Vec<&str> = sources.iter().map(|s| s.app_name.as_str()).collect();
+        println!("{}", serde_json::to_string_pretty(&names)?);
+        return Ok(());
+    }
+
+    print_banner();
+    println!("Scanning for audio-producing applications...\n");
 
     if sources.is_empty() {
         println!("No audio-producing applications found.");
         println!("Hint: Start playing a video in a browser or open a music player.");
     } else {
-        println!("  ┌─────┬────────────────────────────────────┐");
-        println!("  │  #  │ Application                        │");
-        println!("  ├─────┼────────────────────────────────────┤");
+        println!("  +-----+------------------------------------+");
+        println!("  |  #  | Application                        |");
+        println!("  +-----+------------------------------------+");
         for (i, source) in sources.iter().enumerate() {
-            println!("  │ {:>3} │ {:<34} │", i + 1, source.app_name);
+            println!("  | {:>3} | {:<34} |", i + 1, source.app_name);
         }
-        println!("  └─────┴────────────────────────────────────┘");
+        println!("  +-----+------------------------------------+");
         println!();
         println!(
             "    Hint: run `pipeshare route \"{}\"`",
@@ -117,7 +130,7 @@ async fn cmd_list() -> Result<()> {
 
 /// Manual audio routing.
 async fn cmd_route(app_name: &str) -> Result<()> {
-    println!("{}", BANNER);
+    print_banner();
     println!("Initializing manual audio routing for: {}\n", app_name);
 
     let route = audio::create_audio_route_single(app_name).await?;
@@ -125,8 +138,8 @@ async fn cmd_route(app_name: &str) -> Result<()> {
     println!("\nRouting active:");
     println!("  Source: {}", app_name);
     println!("  Mic:    Mixed (System microphone + Application audio)");
-    println!("  Target: PipeShare_Mic (Set as the default microphone)\n");
-    println!("Your communication app should now automatically use 'PipeShare_Mic'.");
+    println!("  Target: PipeShare_Mix.monitor\n");
+    println!("Your communication app should now automatically receive mixed audio.");
     println!("Press Ctrl+C or run 'pipeshare stop' to terminate.");
 
     tokio::signal::ctrl_c().await?;
@@ -139,7 +152,7 @@ async fn cmd_route(app_name: &str) -> Result<()> {
 
 /// Cleans up all PipeShare modules.
 async fn cmd_stop() -> Result<()> {
-    println!("{}", BANNER);
+    print_banner();
     println!("Cleaning up PipeShare virtual devices...\n");
 
     let cleaned = audio::cleanup_all().await?;
@@ -155,7 +168,7 @@ async fn cmd_stop() -> Result<()> {
 
 /// Displays system status and dependencies.
 async fn cmd_status() -> Result<()> {
-    println!("{}", BANNER);
+    print_banner();
     println!("System Status\n");
 
     // PipeWire
@@ -200,7 +213,7 @@ async fn cmd_status() -> Result<()> {
             let ver = String::from_utf8_lossy(&out.stdout);
             println!("  kdialog        : {}", ver.trim());
         }
-        _ => println!("  kdialog        : Not found (dialog prompts will fail back)"),
+        _ => println!("  kdialog        : Not found (dialog prompts will fall back to zenity)"),
     }
 
     // pactl
@@ -240,7 +253,7 @@ async fn cmd_status() -> Result<()> {
 
 /// Live monitor for screen sharing events via D-Bus.
 async fn cmd_monitor() -> Result<()> {
-    println!("{}", BANNER);
+    print_banner();
     println!("Starting event-based screen sharing monitor...");
     println!("Press Ctrl+C to stop.\n");
 
@@ -276,20 +289,21 @@ async fn cmd_monitor() -> Result<()> {
 
 /// Display help information.
 fn cmd_help() {
-    println!("{}", BANNER);
+    print_banner();
     println!("Usage: pipeshare <command> [options]\n");
     println!("Commands:");
     println!("  daemon            Start background service");
-    println!("  list              List audio-producing applications");
+    println!("  list [--json]     List audio-producing applications");
     println!("  route <app>       Start manual audio routing");
     println!("  stop              Stop routing and clean up");
     println!("  status            Display system state");
     println!("  monitor           Monitor screen sharing events");
+    println!("  version           Display version information");
     println!("  help              Display this help message");
     println!();
     println!("Examples:");
     println!("  pipeshare daemon");
-    println!("  pipeshare list");
+    println!("  pipeshare list --json");
     println!("  pipeshare route Firefox");
     println!("  pipeshare stop");
     println!();

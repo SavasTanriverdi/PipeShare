@@ -9,7 +9,7 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 /// Represents an audio node found in PipeWire.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioNode {
     /// PipeWire node id (internal sequence number)
     #[allow(dead_code)]
@@ -22,12 +22,32 @@ pub struct AudioNode {
 /// Used for cleanup when screen sharing stops.
 #[derive(Debug)]
 pub struct AudioRoute {
-    /// Created PulseAudio module IDs — stored for cleanup
+    /// Created PulseAudio module IDs -- stored for cleanup
     pub module_ids: Vec<u32>,
     /// Target application names being routed
     pub target_apps: Vec<String>,
     /// Previous default source prior to routing (to restore later)
+    #[allow(dead_code)]
     pub previous_default_source: Option<String>,
+}
+
+/// Validates an application or audio device identifier before passing it to subprocess tools.
+/// Rejects empty strings, control characters, and shell/property injection characters.
+pub fn validate_app_identifier(name: &str) -> Result<&str> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Application identifier cannot be empty");
+    }
+    if trimmed.len() > 128 {
+        anyhow::bail!("Application identifier exceeds maximum length (128 chars)");
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_control() || matches!(c, ';' | '|' | '&' | '$' | '`' | '\0'))
+    {
+        anyhow::bail!("Application identifier contains invalid or unsafe characters");
+    }
+    Ok(trimmed)
 }
 
 /// Executes the `pw-link` command.
@@ -84,10 +104,10 @@ const FILTERED_PREFIXES: &[&str] = &[
     "xdg-desktop-portal",
 ];
 
-/// Lists applications currently producing audio on the system.
-pub async fn list_audio_sources() -> Result<Vec<AudioNode>> {
-    let output = run_pw_link(&["-o"]).await?;
+/// Parses the output of `pw-link -o` into deduplicated `AudioNode` items.
+pub fn parse_pw_link_output(output: &str) -> Vec<AudioNode> {
     let mut nodes: HashMap<String, AudioNode> = HashMap::new();
+    let mut ordered_keys: Vec<String> = Vec::new();
     let mut next_id: u32 = 1;
 
     for line in output.lines() {
@@ -104,6 +124,9 @@ pub async fn list_audio_sources() -> Result<Vec<AudioNode>> {
 
         if let Some(app_name) = line.split(':').next() {
             let app_name = app_name.trim().to_string();
+            if app_name.is_empty() {
+                continue;
+            }
 
             if FILTERED_PREFIXES
                 .iter()
@@ -113,11 +136,12 @@ pub async fn list_audio_sources() -> Result<Vec<AudioNode>> {
             }
 
             if !nodes.contains_key(&app_name) {
+                ordered_keys.push(app_name.clone());
                 nodes.insert(
                     app_name.clone(),
                     AudioNode {
                         id: next_id,
-                        app_name: app_name.clone(),
+                        app_name,
                     },
                 );
                 next_id += 1;
@@ -125,37 +149,55 @@ pub async fn list_audio_sources() -> Result<Vec<AudioNode>> {
         }
     }
 
-    let result: Vec<AudioNode> = nodes.into_values().collect();
+    ordered_keys
+        .into_iter()
+        .filter_map(|k| nodes.remove(&k))
+        .collect()
+}
+
+/// Lists applications currently producing audio on the system.
+pub async fn list_audio_sources() -> Result<Vec<AudioNode>> {
+    let output = run_pw_link(&["-o"]).await?;
+    let result = parse_pw_link_output(&output);
     info!("Found {} audio sources", result.len());
     Ok(result)
+}
+
+/// Parses a specific header value (e.g. `Default Source:`) from `pactl info` output.
+pub fn parse_pactl_info_field(output: &str, field_prefix: &str) -> Option<String> {
+    for line in output.lines() {
+        if line.contains(field_prefix) {
+            let value = line.split(':').nth(1).unwrap_or("").trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 /// Retrieves the system's current default source (microphone).
 async fn get_default_source() -> Result<String> {
     let output = run_pactl(&["info"]).await?;
-    for line in output.lines() {
-        if line.contains("Default Source:") {
-            return Ok(line.split(':').nth(1).unwrap_or("").trim().to_string());
-        }
-    }
-    anyhow::bail!("Default audio source not found")
+    parse_pactl_info_field(&output, "Default Source:")
+        .ok_or_else(|| anyhow::anyhow!("Default audio source not found"))
 }
 
 /// Retrieves the system's current default sink (speaker/headphones).
 #[allow(dead_code)]
 async fn get_default_sink() -> Result<String> {
     let output = run_pactl(&["info"]).await?;
-    for line in output.lines() {
-        if line.contains("Default Sink:") {
-            return Ok(line.split(':').nth(1).unwrap_or("").trim().to_string());
-        }
-    }
-    anyhow::bail!("Default audio sink not found")
+    parse_pactl_info_field(&output, "Default Sink:")
+        .ok_or_else(|| anyhow::anyhow!("Default audio sink not found"))
 }
 
 /// Creates a complete audio route combining selected applications' audio
 /// and the real microphone.
 pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRoute> {
+    for app_name in target_app_names {
+        validate_app_identifier(app_name)?;
+    }
+
     let mut module_ids: Vec<u32> = Vec::new();
 
     let prev_source = get_default_source().await.ok();
@@ -197,9 +239,7 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     let _ = run_pactl(&["set-sink-volume", "PipeShare_Mix", "100%"]).await;
     info!("PipeShare_Mix created");
 
-
-
-    // Step 4: Real microphone -> PipeShare_Mix
+    // Step 3: Real microphone -> PipeShare_Mix
     if let Some(ref mic) = prev_source {
         if let Ok(id) = run_pactl(&[
             "load-module",
@@ -217,7 +257,7 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
         info!("Microphone loopback to PipeShare_Mix established");
     }
 
-    // Step 5: AppSink.monitor -> PipeShare_Mix
+    // Step 4: AppSink.monitor -> PipeShare_Mix
     if let Ok(id) = run_pactl(&[
         "load-module",
         "module-loopback",
@@ -231,12 +271,12 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
             module_ids.push(mid);
         }
     }
-    info!("App audio → PipeShare_Mix loopback established");
+    info!("App audio -> PipeShare_Mix loopback established");
 
-    // Step 6: AppSink.monitor -> User's Speaker
+    // Step 5: AppSink.monitor -> User's Speaker
     let default_sink = get_default_sink().await.ok();
     let sink_arg = default_sink.map(|s| format!("sink={}", s));
-    
+
     let mut args = vec![
         "load-module",
         "module-loopback",
@@ -246,9 +286,8 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
     if let Some(ref s) = sink_arg {
         args.push(s);
     }
-    
-    if let Ok(id) = run_pactl(&args).await
-    {
+
+    if let Ok(id) = run_pactl(&args).await {
         if let Ok(mid) = id.trim().parse::<u32>() {
             module_ids.push(mid);
         }
@@ -257,15 +296,15 @@ pub async fn create_audio_route(target_app_names: &[String]) -> Result<AudioRout
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Step 7: Move app audio to PipeShare_AppSink
+    // Step 6: Move app audio to PipeShare_AppSink
     for app_name in target_app_names {
         move_app_to_appsink(app_name).await;
     }
 
-    // Step 8: Route recording streams to the Mix monitor directly
+    // Step 7: Route recording streams to the Mix monitor directly
     move_recording_apps_to_mic("PipeShare_Mix.monitor").await?;
 
-    info!("Audio routing initialized — output device switching is fully supported!");
+    info!("Audio routing initialized -- output device switching is fully supported!");
 
     Ok(AudioRoute {
         module_ids,
@@ -315,74 +354,14 @@ async fn move_app_to_appsink(target_app_name: &str) {
 
 /// Public wrapper to re-move app audio after a screen share restart.
 pub async fn relink_app_to_mix(target_app_name: &str) -> Result<()> {
+    validate_app_identifier(target_app_name)?;
     move_app_to_appsink(target_app_name).await;
-    Ok(())
-}
-
-/// Creates parallel audio links from an application to PipeShare_Mix via `pw-link`.
-async fn link_app_to_mix(target_app_name: &str) -> Result<()> {
-    // Get all output ports in the PipeWire graph
-    let output_ports = run_pw_link(&["-o"]).await?;
-
-    // Find app's output ports (e.g., "Firefox:output_FL", "Firefox:output_FR")
-    let app_ports: Vec<&str> = output_ports
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| {
-            if let Some(prefix) = l.split(':').next() {
-                let prefix = prefix.trim();
-                prefix == target_app_name || prefix.starts_with(target_app_name)
-            } else {
-                false
-            }
-        })
-        // Only output/playback ports — skip monitor and capture ports
-        .filter(|l| !l.contains(":monitor_") && !l.contains(":capture_"))
-        .collect();
-
-    if app_ports.is_empty() {
-        warn!("No audio output ports found for '{}'", target_app_name);
-        return Ok(());
-    }
-
-    info!(
-        "Found {} output ports for '{}'",
-        app_ports.len(),
-        target_app_name
-    );
-
-    // Link each app output port to the corresponding PipeShare_Mix input port
-    for port in &app_ports {
-        // Determine the channel (FL/FR) based on port name patterns
-        let mix_target = if port.contains("FL")
-            || port.contains(":output_0")
-            || port.contains("front-left")
-        {
-            "PipeShare_Mix:playback_FL"
-        } else if port.contains("FR") || port.contains(":output_1") || port.contains("front-right")
-        {
-            "PipeShare_Mix:playback_FR"
-        } else {
-            // Mono or unknown channel — route to FL
-            "PipeShare_Mix:playback_FL"
-        };
-
-        match run_pw_link(&[port, mix_target]).await {
-            Ok(_) => info!("{} → {} (parallel link)", port, mix_target),
-            Err(e) => warn!("Failed to link {}: {}", port, e),
-        }
-    }
-
-    info!(
-        "{} audio tapped successfully — output device remains user-controlled",
-        target_app_name
-    );
     Ok(())
 }
 
 /// Moves active recording streams (source-outputs) to our virtual microphone.
 /// This targets WebRTC applications (Element, Discord, Firefox, Chrome) and routes
-/// them silently to `PipeShare_Mic.monitor` without touching the global default microphone.
+/// them silently to `PipeShare_Mix.monitor` without touching the global default microphone.
 pub async fn move_recording_apps_to_mic(virtual_mic_name: &str) -> Result<()> {
     let output = run_pactl(&["list", "source-outputs"]).await?;
     let mut current_id = None;
@@ -425,6 +404,7 @@ pub async fn move_recording_apps_to_mic(virtual_mic_name: &str) -> Result<()> {
 
 /// Helper to create a route for a single application.
 pub async fn create_audio_route_single(target_app_name: &str) -> Result<AudioRoute> {
+    validate_app_identifier(target_app_name)?;
     create_audio_route(&[target_app_name.to_string()]).await
 }
 
@@ -437,9 +417,8 @@ pub async fn destroy_audio_route(route: &AudioRoute) -> Result<()> {
     info!("Cleaning up audio route for: {:?}", route.target_apps);
 
     // CRITICAL: Restore recording streams BEFORE destroying modules.
-    // If we destroy PipeShare_Mic first, Element's WebRTC source-output
-    // would point to a non-existent source, breaking its entire pipeline.
-    // This is why the share button stops working after the first share.
+    // If we destroy PipeShare_Mix first, WebRTC source-outputs
+    // would point to a non-existent source, breaking the capture pipeline.
     restore_recording_streams_to_default().await;
 
     // Unload modules in reverse order (dependency order)
@@ -479,7 +458,7 @@ async fn restore_recording_streams_to_default() {
                 .strip_prefix("Source Output #")
                 .map(|s| s.to_string());
         } else if trimmed.contains("PipeShare") || trimmed.contains("pipeshare") {
-            // This source-output is connected to a PipeShare source — restore it
+            // This source-output is connected to a PipeShare source -- restore it
             if let Some(ref id) = current_id {
                 match run_pactl(&["move-source-output", id, &default_source]).await {
                     Ok(_) => info!("Restored recording stream {} to {}", id, default_source),
@@ -539,6 +518,61 @@ pub async fn cleanup_all() -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_app_identifier() {
+        assert_eq!(validate_app_identifier("Firefox").unwrap(), "Firefox");
+        assert_eq!(
+            validate_app_identifier("  VLC media player  ").unwrap(),
+            "VLC media player"
+        );
+        assert!(validate_app_identifier("").is_err());
+        assert!(validate_app_identifier("Firefox; rm -rf /").is_err());
+        assert!(validate_app_identifier("App\nInjected").is_err());
+    }
+
+    #[test]
+    fn test_parse_pw_link_output() {
+        let sample = "\
+alsa_output.pci-0000_00_1f.3.analog-stereo:monitor_FL
+Firefox:output_FL
+Firefox:output_FR
+Spotify:output_FL
+PipeShare_Mix:monitor_FL
+WEBRTC VoiceEngine:capture_FL
+";
+        let nodes = parse_pw_link_output(sample);
+        assert_eq!(
+            nodes,
+            vec![
+                AudioNode {
+                    id: 1,
+                    app_name: "Firefox".to_string(),
+                },
+                AudioNode {
+                    id: 2,
+                    app_name: "Spotify".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_pactl_info_field() {
+        let info = "\
+Server Name: PulseAudio (on PipeWire 1.2.4)
+Default Sink: alsa_output.pci-0000_00_1f.3.analog-stereo
+Default Source: alsa_input.usb-Focusrite_Scarlett-00.mono-fallback
+";
+        assert_eq!(
+            parse_pactl_info_field(info, "Default Source:"),
+            Some("alsa_input.usb-Focusrite_Scarlett-00.mono-fallback".to_string())
+        );
+        assert_eq!(
+            parse_pactl_info_field(info, "Default Sink:"),
+            Some("alsa_output.pci-0000_00_1f.3.analog-stereo".to_string())
+        );
+    }
 
     #[tokio::test]
     async fn test_list_audio_sources() {

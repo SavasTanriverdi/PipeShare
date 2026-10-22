@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 use zbus::Connection;
 
 /// Represents events related to screen sharing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenShareEvent {
     /// A new screen sharing session has started
     Started {
@@ -54,12 +54,26 @@ struct PwDumpProps {
 }
 
 /// Video nodes that are always present and UNRELATED to screen sharing.
-/// We must filter these out to prevent false positives.
+/// We must filter these out to prevent false positives across Wayland compositors.
 const ALWAYS_PRESENT_NODES: &[&str] = &[
     "kwin_wayland",
     "plasmashell",
+    "mutter",
+    "gnome-shell",
     "xdg-desktop-portal-kde",
+    "xdg-desktop-portal-gnome",
+    "xdg-desktop-portal-hyprland",
+    "xdg-desktop-portal-wlr",
     "xdg-desktop-portal",
+];
+
+/// Supported XDG Desktop Portal ScreenCast backends across Wayland compositors.
+const PORTAL_BACKENDS: &[&str] = &[
+    "org.freedesktop.impl.portal.desktop.kde",
+    "org.freedesktop.impl.portal.desktop.gnome",
+    "org.freedesktop.impl.portal.desktop.hyprland",
+    "org.freedesktop.impl.portal.desktop.wlr",
+    "org.freedesktop.impl.portal.desktop.gtk",
 ];
 
 /// media.class values used to identify ScreenCast session nodes.
@@ -80,7 +94,7 @@ const SCREENCAST_MEDIA_CLASSES: &[&str] = &[
 pub async fn monitor_screen_share(tx: mpsc::Sender<ScreenShareEvent>) -> Result<()> {
     info!("Starting event-based PipeWire monitor...");
 
-    // Understand the current state — is there an active ScreenCast session already?
+    // Understand the current state -- is there an active ScreenCast session already?
     let baseline_ids = get_current_screencast_nodes().await?;
     if !baseline_ids.is_empty() {
         info!(
@@ -111,9 +125,39 @@ pub async fn monitor_screen_share(tx: mpsc::Sender<ScreenShareEvent>) -> Result<
             }
         }
 
-        // Automatic reconnection — self-healing if daemon crashes
+        // Automatic reconnection -- self-healing if daemon crashes
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
+}
+
+/// Updates JSON array bracket depth while ignoring brackets inside string literals.
+fn update_bracket_depth(line: &str, mut depth: i32) -> i32 {
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if !in_string {
+            match ch {
+                '[' => depth += 1,
+                ']' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    depth
 }
 
 /// Spawns the `pw-dump --monitor` process and parses its output.
@@ -139,7 +183,7 @@ async fn run_monitor_loop(
     let mut bracket_depth: i32 = 0;
     let mut in_array = false;
 
-    info!("PipeWire event flow started — waiting for screen sharing...");
+    info!("PipeWire event flow started -- waiting for screen sharing...");
 
     loop {
         let mut line = String::new();
@@ -153,7 +197,7 @@ async fn run_monitor_loop(
         let trimmed = line.trim();
 
         // Track JSON array start/end
-        if trimmed == "[" {
+        if !in_array && trimmed == "[" {
             in_array = true;
             json_buffer.clear();
             json_buffer.push_str(trimmed);
@@ -165,17 +209,10 @@ async fn run_monitor_loop(
             json_buffer.push('\n');
             json_buffer.push_str(trimmed);
 
-            // Track bracket depth
-            for ch in trimmed.chars() {
-                match ch {
-                    '[' => bracket_depth += 1,
-                    ']' => bracket_depth -= 1,
-                    _ => {}
-                }
-            }
+            bracket_depth = update_bracket_depth(trimmed, bracket_depth);
 
-            // Array closed — parse time
-            if bracket_depth == 0 {
+            // Array closed -- parse time
+            if bracket_depth <= 0 {
                 in_array = false;
                 process_pw_dump_update(&json_buffer, tx, known_ids, active_session_ids).await;
                 json_buffer.clear();
@@ -287,7 +324,7 @@ async fn process_pw_dump_update(
 
 /// Returns the IDs of ScreenCast nodes in the current PipeWire graph.
 ///
-/// Used initially to establish a "baseline" — so that we can isolate
+/// Used initially to establish a "baseline" -- so that we can isolate
 /// new nodes from the already present ones.
 async fn get_current_screencast_nodes() -> Result<HashSet<u32>> {
     let output = tokio::process::Command::new("pw-dump")
@@ -319,15 +356,7 @@ async fn get_current_screencast_nodes() -> Result<HashSet<u32>> {
     Ok(ids)
 }
 
-/// Queries portal availability via D-Bus with thorough checks.
-///
-/// Verifies:
-/// 1. `org.freedesktop.portal.Desktop` — the main portal service
-/// 2. `org.freedesktop.impl.portal.desktop.kde` — the KDE backend
-///    (provides ScreenCast, Screenshot, RemoteDesktop)
-///
-/// Both services may take time to appear during boot (D-Bus activated).
-/// Waits up to 30 seconds for each to become available.
+/// Queries portal availability via D-Bus across supported Wayland desktop backends.
 pub async fn check_portal_available() -> Result<bool> {
     let connection = Connection::session()
         .await
@@ -354,28 +383,36 @@ pub async fn check_portal_available() -> Result<bool> {
     }
     info!("XDG Desktop Portal is active and registered");
 
-    // Check 2: KDE backend (provides ScreenCast)
-    // On KDE Plasma/Wayland, this is the backend that handles screen sharing dialogs.
-    // If missing, ScreenCast requests will silently fail.
-    let mut kde_ok = check_dbus_name(&connection, "org.freedesktop.impl.portal.desktop.kde").await;
+    // Check 2: Compositor-specific ScreenCast portal backend (KDE, GNOME, Hyprland, wlroots, GTK)
+    let mut detected_backend: Option<&str> = None;
+    for backend in PORTAL_BACKENDS {
+        if check_dbus_name(&connection, backend).await {
+            detected_backend = Some(backend);
+            break;
+        }
+    }
 
-    if !kde_ok {
-        info!("KDE portal backend not yet on D-Bus, waiting up to 15s...");
+    if detected_backend.is_none() {
+        info!("Portal backend not yet on D-Bus, waiting up to 15s...");
         for i in 1..=15 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            kde_ok = check_dbus_name(&connection, "org.freedesktop.impl.portal.desktop.kde").await;
-            if kde_ok {
-                info!("KDE portal backend appeared after {}s", i);
+            for backend in PORTAL_BACKENDS {
+                if check_dbus_name(&connection, backend).await {
+                    detected_backend = Some(backend);
+                    info!("Portal backend '{}' appeared after {}s", backend, i);
+                    break;
+                }
+            }
+            if detected_backend.is_some() {
                 break;
             }
         }
     }
 
-    if kde_ok {
-        info!("KDE ScreenCast portal backend is available");
+    if let Some(backend) = detected_backend {
+        info!("ScreenCast portal backend is available: {}", backend);
     } else {
-        warn!("KDE portal backend not found — ScreenCast may not work!");
-        warn!("    Screen sharing dialogs may fail to appear.");
+        warn!("No known ScreenCast portal backend found -- ScreenCast may not work!");
         warn!("    Try: systemctl --user restart xdg-desktop-portal.service");
     }
 
@@ -406,6 +443,72 @@ async fn check_dbus_name(connection: &Connection, bus_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bracket_depth_ignores_brackets_in_strings() {
+        let depth = 1;
+        let line = r#"{"application.name": "Firefox [WebRTC]", "nested": [1, 2]}"#;
+        assert_eq!(update_bracket_depth(line, depth), 1);
+        assert_eq!(update_bracket_depth("]", 1), 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_pw_dump_lifecycle() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut known_ids = HashSet::new();
+        let mut active_ids = HashSet::new();
+
+        // 1. Always-present system node should be ignored
+        let system_json = r#"[
+            {
+                "id": 42,
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {
+                        "media.class": "Stream/Output/Video",
+                        "node.name": "kwin_wayland"
+                    }
+                }
+            }
+        ]"#;
+        process_pw_dump_update(system_json, &tx, &mut known_ids, &mut active_ids).await;
+        assert!(rx.try_recv().is_err());
+
+        // 2. Active WebRTC ScreenCast node should trigger Started
+        let start_json = r#"[
+            {
+                "id": 99,
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {
+                        "media.class": "Stream/Input/Video",
+                        "node.name": "webrtc-consumer",
+                        "application.name": "Discord"
+                    }
+                }
+            }
+        ]"#;
+        process_pw_dump_update(start_json, &tx, &mut known_ids, &mut active_ids).await;
+        let evt = rx.try_recv().expect("Expected Started event");
+        assert_eq!(
+            evt,
+            ScreenShareEvent::Started {
+                app_name: Some("Discord".to_string()),
+                node_id: 99,
+            }
+        );
+
+        // 3. Node deletion (info: null) should trigger Stopped
+        let stop_json = r#"[
+            {
+                "id": 99,
+                "info": null
+            }
+        ]"#;
+        process_pw_dump_update(stop_json, &tx, &mut known_ids, &mut active_ids).await;
+        let stop_evt = rx.try_recv().expect("Expected Stopped event");
+        assert_eq!(stop_evt, ScreenShareEvent::Stopped { node_id: 99 });
+    }
 
     #[tokio::test]
     async fn test_portal_check() {

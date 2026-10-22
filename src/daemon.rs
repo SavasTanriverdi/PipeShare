@@ -4,7 +4,7 @@
 use anyhow::Result;
 use std::process::Stdio;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::audio;
 use crate::dbus_monitor::{self, ScreenShareEvent};
@@ -46,7 +46,6 @@ pub async fn run_daemon() -> Result<()> {
                     info!("Cleanup timeout reached. Destroying audio route.");
                     if let Some(route) = active_route.take() {
                         let _ = audio::destroy_audio_route(&route).await;
-                        // Removed the annoying "Audio Share Terminated" notification as requested
                     }
                     active_node_id = None;
                     pending_cleanup = false;
@@ -156,7 +155,6 @@ pub async fn run_daemon() -> Result<()> {
 
 /// Posts desktop notification via `notify-send`.
 async fn send_notification(title: &str, body: &str) {
-    // Attempt notify-send command
     let result = tokio::process::Command::new("notify-send")
         .args([
             "--app-name=PipeShare",
@@ -173,6 +171,40 @@ async fn send_notification(title: &str, body: &str) {
     if let Err(e) = result {
         warn!("Failed to execute notify-send: {}", e);
     }
+}
+
+/// Parses `kdialog --checklist` output (quoted tokens or newline-delimited items).
+pub fn parse_kdialog_selection(selected: &str) -> Vec<String> {
+    let mut selected_apps = Vec::new();
+    let mut current_app = String::new();
+    let mut in_quotes = false;
+
+    for c in selected.chars() {
+        if c == '"' {
+            if in_quotes {
+                if !current_app.trim().is_empty() {
+                    selected_apps.push(current_app.clone());
+                }
+                current_app.clear();
+                in_quotes = false;
+            } else {
+                in_quotes = true;
+            }
+        } else if in_quotes {
+            current_app.push(c);
+        }
+    }
+
+    if selected_apps.is_empty() && !selected.trim().is_empty() {
+        selected_apps = selected
+            .trim()
+            .split('\n')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
+    selected_apps
 }
 
 /// Prompts the user with a dialog to pick applications to broadcast audio for.
@@ -203,7 +235,7 @@ async fn ask_user_for_audio_source() -> Result<Option<Vec<String>>> {
     }
 
     args.push("--title".to_string());
-    args.push("PipeShare — Audio Link".to_string());
+    args.push("PipeShare - Audio Link".to_string());
 
     let output = tokio::process::Command::new("kdialog")
         .args(&args)
@@ -215,42 +247,10 @@ async fn ask_user_for_audio_source() -> Result<Option<Vec<String>>> {
     match output {
         Ok(out) => {
             if !out.status.success() {
-                // Return no-app upon user abort
                 return Ok(None);
             }
             let selected = String::from_utf8_lossy(&out.stdout);
-
-            // kdialog `--checklist` output format: "App 1" "App 2"
-            // Use quotes tracking instead of whitespace split as app titles may contain spaces
-            let mut selected_apps = Vec::new();
-            let mut current_app = String::new();
-            let mut in_quotes = false;
-
-            for c in selected.chars() {
-                if c == '"' {
-                    if in_quotes {
-                        if !current_app.trim().is_empty() {
-                            selected_apps.push(current_app.clone());
-                        }
-                        current_app.clear();
-                        in_quotes = false;
-                    } else {
-                        in_quotes = true;
-                    }
-                } else if in_quotes {
-                    current_app.push(c);
-                }
-            }
-
-            // Fallback: simple text output instead of quotes
-            if selected_apps.is_empty() && !selected.trim().is_empty() {
-                selected_apps = selected
-                    .trim()
-                    .split('\n')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
+            let selected_apps = parse_kdialog_selection(&selected);
 
             if selected_apps.is_empty() {
                 return Ok(None);
@@ -258,10 +258,7 @@ async fn ask_user_for_audio_source() -> Result<Option<Vec<String>>> {
 
             Ok(Some(selected_apps))
         }
-        Err(_) => {
-            // Resort to Zenity dialog integration on instances missing `kdialog`
-            try_zenity_dialog(&sources).await
-        }
+        Err(_) => try_zenity_dialog(&sources).await,
     }
 }
 
@@ -270,11 +267,11 @@ async fn try_zenity_dialog(sources: &[audio::AudioNode]) -> Result<Option<Vec<St
     let mut args: Vec<String> = vec![
         "--list".to_string(),
         "--checklist".to_string(),
-        "--title=PipeShare — Audio Link".to_string(),
+        "--title=PipeShare - Audio Link".to_string(),
         "--text=Please select applications to capture:".to_string(),
         "--column=".to_string(),
         "--column=Application".to_string(),
-        "--separator= ".to_string(),
+        "--separator=\n".to_string(),
     ];
 
     for source in sources {
@@ -295,9 +292,8 @@ async fn try_zenity_dialog(sources: &[audio::AudioNode]) -> Result<Option<Vec<St
 
     let selected = String::from_utf8_lossy(&output.stdout);
     let selected_apps: Vec<String> = selected
-        .trim()
-        .split_whitespace()
-        .map(|s| s.to_string())
+        .lines()
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -306,4 +302,31 @@ async fn try_zenity_dialog(sources: &[audio::AudioNode]) -> Result<Option<Vec<St
     }
 
     Ok(Some(selected_apps))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_kdialog_selection_quoted() {
+        let raw = "\"Firefox\" \"VLC media player\" \"Spotify\"\n";
+        assert_eq!(
+            parse_kdialog_selection(raw),
+            vec![
+                "Firefox".to_string(),
+                "VLC media player".to_string(),
+                "Spotify".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_kdialog_selection_newlines() {
+        let raw = "Firefox\nVLC media player\n";
+        assert_eq!(
+            parse_kdialog_selection(raw),
+            vec!["Firefox".to_string(), "VLC media player".to_string()]
+        );
+    }
 }
